@@ -1,36 +1,77 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 import tempfile
+import time
 import uuid
 from contextlib import asynccontextmanager
 from importlib import import_module
 from typing import Any
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 
 from app.config import QdrantClientSingleton, load_qdrant_settings
+from app.batch_api import router as batch_router
 from app.fingerprinters import AudioFingerprinter, ImageFingerprinter, SemanticEmbedder, VideoFingerprinter
+from app.hitl_api import router as hitl_router
+from app.xai_api import router as xai_router
 from app.registry import RegistryManager
 from app.schemas import FingerprintResponse, MatchItem, MatchResponse, Modality
 
 try:
+    from decision_layer.services.audit_service import LocalPrivateKeySigner
+    from decision_layer.services.batch_coordinator import BatchCoordinator, BatchCoordinatorConfig
     from decision_layer.services.graph_db import GraphDBService
+    from decision_layer.services.hitl_monitor import HITLMonitorService
     from decision_layer.services.monitoring import MetricsRegistry, PrometheusMiddleware, metrics_response
+    from decision_layer.services.xai_storage import ExplainabilityStorage
+    from decision_layer.services.xai_umap import UMAPProjector
+    from decision_layer.shared import (
+        check_connections,
+        close_db_clients,
+        get_neo4j_driver,
+        get_postgres_pool,
+        get_redis_client,
+    )
 except ModuleNotFoundError:  # pragma: no cover
+    from services.audit_service import LocalPrivateKeySigner
+    from services.batch_coordinator import BatchCoordinator, BatchCoordinatorConfig
     from services.graph_db import GraphDBService
+    from services.hitl_monitor import HITLMonitorService
     from services.monitoring import MetricsRegistry, PrometheusMiddleware, metrics_response
+    from services.xai_storage import ExplainabilityStorage
+    from services.xai_umap import UMAPProjector
+    from shared import check_connections, close_db_clients, get_neo4j_driver, get_postgres_pool, get_redis_client
+
+
+logger = logging.getLogger(__name__)
 
 image_fp = ImageFingerprinter()
 video_fp = VideoFingerprinter(frames_to_sample=16)
 audio_fp = AudioFingerprinter()
 semantic_fp = SemanticEmbedder(embedding_dim=512)
 GLOBAL_METRICS = MetricsRegistry()
+gateway_router = APIRouter(tags=["gateway"])
+
+
+def _build_batch_signer() -> LocalPrivateKeySigner | None:
+    private_key = os.getenv("POLYGON_PRIVATE_KEY")
+    if not private_key:
+        return None
+    return LocalPrivateKeySigner(private_key)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    try:
+        await check_connections()
+    except Exception as exc:
+        logger.critical("Cloud dependency health check failed during startup: %s", exc)
+        raise RuntimeError("Startup aborted: cloud dependencies are unavailable") from exc
+
     settings = load_qdrant_settings()
     qdrant_client = QdrantClientSingleton.get_client(settings)
 
@@ -58,6 +99,26 @@ async def lifespan(app: FastAPI):
         graph_db = None
     app.state.graph_db = graph_db
 
+    hitl_monitor = HITLMonitorService(graph_db=graph_db)
+    hitl_stop_event = asyncio.Event()
+    hitl_maintenance_task = asyncio.create_task(hitl_monitor.run_maintenance_loop(hitl_stop_event))
+    app.state.hitl_monitor = hitl_monitor
+    app.state.hitl_stop_event = hitl_stop_event
+    app.state.hitl_maintenance_task = hitl_maintenance_task
+
+    batch_signer = _build_batch_signer()
+    batch_coordinator = None
+    try:
+        if batch_signer is not None and os.getenv("MERKLE_ANCHOR_CONTRACT"):
+            batch_coordinator = BatchCoordinator(
+                signer=batch_signer,
+                config=BatchCoordinatorConfig.from_env(),
+            )
+            await batch_coordinator.start()
+    except Exception:
+        batch_coordinator = None
+    app.state.batch_coordinator = batch_coordinator
+
     # Stage-7 explainability components (lazy-imported to avoid hard startup coupling).
     explainers_module = import_module("app.reasoning.explainers")
     graph_builder_module = import_module("app.reasoning.graph_builder")
@@ -73,11 +134,53 @@ async def lifespan(app: FastAPI):
     app.state.rights_model = rights_gnn_cls()
     app.state.graph_explainer = graph_explainer_cls(app.state.rights_model)
 
+    xai_storage = None
+    umap_projector = None
+    try:
+        xai_storage = ExplainabilityStorage.from_env()
+        app.state.xai_storage = xai_storage
+    except Exception:
+        app.state.xai_storage = None
+
+    try:
+        umap_projector = UMAPProjector.from_env()
+        app.state.umap_projector = umap_projector
+    except Exception:
+        app.state.umap_projector = None
+
     try:
         yield
     finally:
+        if getattr(app.state, "batch_coordinator", None) is not None:
+            await app.state.batch_coordinator.stop()
+
+        stop_event = getattr(app.state, "hitl_stop_event", None)
+        maintenance_task = getattr(app.state, "hitl_maintenance_task", None)
+        if stop_event is not None:
+            stop_event.set()
+        if maintenance_task is not None:
+            maintenance_task.cancel()
+            try:
+                await maintenance_task
+            except asyncio.CancelledError:
+                pass
+
+        hitl_monitor = getattr(app.state, "hitl_monitor", None)
+        if hitl_monitor is not None:
+            hitl_monitor.close()
+
+        xai_storage = getattr(app.state, "xai_storage", None)
+        if xai_storage is not None:
+            xai_storage.close()
+
+        umap_projector = getattr(app.state, "umap_projector", None)
+        if umap_projector is not None:
+            umap_projector.close()
+
         if app.state.graph_db is not None:
             app.state.graph_db.close()
+
+        await close_db_clients()
         QdrantClientSingleton.close_client()
 
 
@@ -87,6 +190,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.add_middleware(PrometheusMiddleware, metrics=GLOBAL_METRICS)
+app.include_router(batch_router)
+app.include_router(hitl_router)
+app.include_router(xai_router)
 
 
 def _registry() -> RegistryManager:
@@ -540,12 +646,73 @@ async def metrics() -> Response:
     return metrics_response()
 
 
-@app.get("/health")
+async def _measure_cloud_latency_ms(fn: Any) -> tuple[str, float | None, str | None]:
+    start = time.perf_counter()
+    try:
+        await fn()
+        latency_ms = (time.perf_counter() - start) * 1000.0
+        return "ok", round(latency_ms, 2), None
+    except Exception as exc:  # pragma: no cover - runtime/network dependent
+        latency_ms = (time.perf_counter() - start) * 1000.0
+        return "down", round(latency_ms, 2), str(exc)
+
+
+async def _cloud_health_status() -> dict[str, Any]:
+    redis_client = await get_redis_client()
+    postgres_pool = await get_postgres_pool()
+    neo4j_driver = await get_neo4j_driver()
+
+    async def _redis_probe() -> None:
+        pong = await redis_client.ping()
+        if pong is not True:
+            raise RuntimeError("unexpected PING response")
+
+    async def _postgres_probe() -> None:
+        async with postgres_pool.acquire() as conn:
+            value = await conn.fetchval("SELECT 1")
+            if value != 1:
+                raise RuntimeError("unexpected SELECT 1 result")
+
+    async def _neo4j_probe() -> None:
+        async with neo4j_driver.session() as session:
+            result = await session.run("RETURN 1 AS ok")
+            record = await result.single()
+            if record is None or record.get("ok") != 1:
+                raise RuntimeError("unexpected Neo4j query result")
+
+    redis_status, redis_latency, redis_error = await _measure_cloud_latency_ms(_redis_probe)
+    postgres_status, postgres_latency, postgres_error = await _measure_cloud_latency_ms(_postgres_probe)
+    neo4j_status, neo4j_latency, neo4j_error = await _measure_cloud_latency_ms(_neo4j_probe)
+
+    services = {
+        "redis": {
+            "status": redis_status,
+            "latency_ms": redis_latency,
+            "error": redis_error,
+        },
+        "postgres": {
+            "status": postgres_status,
+            "latency_ms": postgres_latency,
+            "error": postgres_error,
+        },
+        "neo4j": {
+            "status": neo4j_status,
+            "latency_ms": neo4j_latency,
+            "error": neo4j_error,
+        },
+    }
+
+    overall = "ok" if all(s["status"] == "ok" for s in services.values()) else "degraded"
+    return {"status": overall, "services": services}
+
+
+@gateway_router.get("/health")
 async def health() -> dict[str, Any]:
     registry = _registry()
     monitor = getattr(app.state, "calibration_monitor", {"preds": [], "targets": []})
     preds = monitor.get("preds", [])
     targets = monitor.get("targets", [])
+    cloud = await _cloud_health_status()
 
     ece = _compute_ece(preds, targets, n_bins=10) if len(preds) >= 10 else None
     metrics = getattr(app.state, "metrics", None)
@@ -553,7 +720,8 @@ async def health() -> dict[str, Any]:
         metrics.set_ece(float(ece))
 
     return {
-        "status": "ok",
+        "status": cloud["status"],
+        "cloud": cloud["services"],
         "registered": {
             "images": len(registry.image_ids),
             "videos": len(registry.video_ids),
@@ -565,3 +733,6 @@ async def health() -> dict[str, Any]:
             "ece_10_bins": ece,
         },
     }
+
+
+app.include_router(gateway_router)
