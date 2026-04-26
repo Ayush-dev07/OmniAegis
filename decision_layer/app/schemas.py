@@ -10,7 +10,6 @@ class Modality(str, Enum):
     image = "image"
     video = "video"
     audio = "audio"
-    document = "document"
 
 
 class FingerprintResponse(BaseModel):
