@@ -49,3 +49,15 @@ class MatchResponse(BaseModel):
     query_summary: dict[str, Any]
     matches: list[MatchItem]
     explanation: ExplanationPayload = Field(default_factory=ExplanationPayload)
+
+
+class MerkleProofResponse(BaseModel):
+    decision_id: str
+    batch_id: str
+    merkle_root: str
+    leaf_hash: str
+    proof_hashes: list[str] = Field(default_factory=list)
+    hash_algorithm: str = "sha256"
+    leaf_index: int
+    window_start: int
+    window_end: int

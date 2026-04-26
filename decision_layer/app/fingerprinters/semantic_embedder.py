@@ -22,7 +22,7 @@ class SemanticEmbedder:
 
     CPU-first design:
     - Uses `torch.no_grad()` for inference-only path.
-    - Produces NumPy float32 output for direct FAISS usage.
+    - Produces NumPy float32 output for direct vector database usage.
     """
 
     def __init__(self, embedding_dim: int = 512) -> None:

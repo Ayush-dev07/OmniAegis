@@ -15,7 +15,7 @@ class AudioFingerprinter:
     3) Build landmarks from (anchor_peak, target_peak) pairs using:
        - relative chroma interval (mod 12) -> pitch-shift tolerant
        - beat-distance (not seconds) -> speed/time-scale tolerant
-    4) Hash landmarks into a compact histogram embedding for FAISS cosine search.
+    4) Hash landmarks into a compact histogram embedding for vector search.
 
     This avoids heavy neural inference and remains fast on low-end CPUs.
     """
