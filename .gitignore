@@ -100,4 +100,3 @@ coverage/
 *.log
 tmp/
 temp/
-.qdrant
