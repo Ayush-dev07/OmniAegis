@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import tempfile
@@ -13,13 +14,27 @@ from typing import Any
 from fastapi import APIRouter, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 
-from app.config import QdrantClientSingleton, load_qdrant_settings
-from app.batch_api import router as batch_router
-from app.fingerprinters import AudioFingerprinter, ImageFingerprinter, SemanticEmbedder, VideoFingerprinter
-from app.hitl_api import router as hitl_router
-from app.xai_api import router as xai_router
-from app.registry import RegistryManager
-from app.schemas import FingerprintResponse, MatchItem, MatchResponse, Modality
+try:
+    from decision_layer.app.config import QdrantClientSingleton, load_qdrant_settings
+    from decision_layer.app.batch_api import router as batch_router
+    from decision_layer.app.fingerprinters import (
+        AudioFingerprinter,
+        ImageFingerprinter,
+        SemanticEmbedder,
+        VideoFingerprinter,
+    )
+    from decision_layer.app.hitl_api import router as hitl_router
+    from decision_layer.app.xai_api import router as xai_router
+    from decision_layer.app.registry import RegistryManager
+    from decision_layer.app.schemas import FingerprintResponse, MatchItem, MatchResponse, Modality
+except ModuleNotFoundError:  # pragma: no cover
+    from app.config import QdrantClientSingleton, load_qdrant_settings
+    from app.batch_api import router as batch_router
+    from app.fingerprinters import AudioFingerprinter, ImageFingerprinter, SemanticEmbedder, VideoFingerprinter
+    from app.hitl_api import router as hitl_router
+    from app.xai_api import router as xai_router
+    from app.registry import RegistryManager
+    from app.schemas import FingerprintResponse, MatchItem, MatchResponse, Modality
 
 try:
     from decision_layer.services.audit_service import LocalPrivateKeySigner
@@ -202,6 +217,138 @@ def _registry() -> RegistryManager:
     return registry
 
 
+def _graph_db() -> GraphDBService | None:
+    return getattr(app.state, "graph_db", None)
+
+
+def _parse_rights_context_json(raw: str | None) -> dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+def _build_rights_context(
+    *,
+    modality: str,
+    filename: str | None,
+    source: str | None,
+    rights_context_json: str | None,
+    fingerprint_hash: str | None,
+    fingerprint_kind: str | None,
+    embedding_vector: list[float] | None = None,
+) -> dict[str, Any]:
+    ctx = _parse_rights_context_json(rights_context_json)
+
+    creator = dict(ctx.get("creator") or {})
+    licensee = dict(ctx.get("licensee") or {})
+    license_terms = dict(ctx.get("license_terms") or {})
+
+    # Allow both nested and flat inputs.
+    creator_id = ctx.get("creator_id") or creator.get("creator_id")
+    licensee_id = ctx.get("licensee_id") or licensee.get("licensee_id")
+
+    content_type = str(ctx.get("content_type", modality) or modality).strip().lower()
+    if content_type not in {"image", "video", "audio", "document"}:
+        content_type = modality
+
+    protected_work = bool(ctx.get("protected_work", True))
+
+    return {
+        "modality": modality,
+        "content_type": content_type,
+        "source": source,
+        "filename": filename,
+        "protected_work": protected_work,
+        "schema_version": int(ctx.get("schema_version", 2)),
+        "registered_at": ctx.get("registered_at"),
+        "embedding_vector": embedding_vector,
+        "fingerprint_hash": fingerprint_hash,
+        "fingerprint_kind": fingerprint_kind,
+        "is_flagged": bool(ctx.get("is_flagged", False)),
+        "creator_id": creator_id,
+        "creator_trust_score": float(ctx.get("creator_trust_score", creator.get("trust_score", 0.5))),
+        "creator_tenure_months": float(ctx.get("creator_tenure_months", creator.get("tenure_months", 12.0))),
+        "creator_verified": bool(ctx.get("creator_verified", creator.get("verified", False))),
+        "creator_registered_works": int(
+            ctx.get("creator_registered_works", creator.get("registered_works", 0))
+        ),
+        "creator_active_licenses": int(ctx.get("creator_active_licenses", creator.get("active_licenses", 0))),
+        "licensee_id": licensee_id,
+        "licensee_jurisdiction": str(
+            ctx.get("licensee_jurisdiction", licensee.get("jurisdiction", "")) or ""
+        ),
+        "licensee_active_license_count": int(
+            ctx.get("licensee_active_license_count", licensee.get("active_license_count", 0))
+        ),
+        "license_status": float(ctx.get("license_status", licensee.get("license_status", 0.0))),
+        "license_type": str(ctx.get("license_type", license_terms.get("license_type", "")) or ""),
+        "license_expires_at": str(ctx.get("license_expires_at", license_terms.get("expires_at", "")) or ""),
+        "license_territory": str(ctx.get("license_territory", license_terms.get("territory", "")) or ""),
+        "license_jurisdiction": str(
+            ctx.get("license_jurisdiction", license_terms.get("jurisdiction", licensee.get("jurisdiction", "")))
+            or ""
+        ),
+        "license_derivative_allowed": bool(
+            ctx.get("license_derivative_allowed", license_terms.get("derivative_allowed", False))
+        ),
+        "license_commercial_use": bool(
+            ctx.get("license_commercial_use", license_terms.get("commercial_use", False))
+        ),
+        "license_active": bool(ctx.get("license_active", license_terms.get("active", False))),
+        "creator": creator,
+        "licensee": licensee,
+        "license_terms": license_terms,
+    }
+
+
+def _match_results_to_neighbors(
+    results: list[Any],
+    *,
+    model_name: str,
+    model_version: str,
+    threshold: float,
+    match_context: str,
+    limit: int = 16,
+) -> list[dict[str, Any]]:
+    neighbors: list[dict[str, Any]] = []
+    for r in results[:limit]:
+        metadata = dict(getattr(r, "metadata", {}) or {})
+        neighbors.append(
+            {
+                "asset_id": str(getattr(r, "asset_id", "")),
+                "similarity": float(getattr(r, "distance_or_similarity", 0.0)),
+                "is_flagged": bool(metadata.get("is_flagged", False)),
+                "modality": metadata.get("modality"),
+                "flagged_weight": float(metadata.get("flagged_weight", 1.5)),
+                "model_name": model_name,
+                "model_version": model_version,
+                "threshold": threshold,
+                "match_context": match_context,
+                "updated_at": int(time.time() * 1000),
+                "evidence_source": metadata.get("flagged_evidence_source", "historical_case"),
+                "case_id": metadata.get("flagged_case_id"),
+                "confidence": float(metadata.get("flagged_confidence", 1.0)),
+            }
+        )
+    return [n for n in neighbors if n.get("asset_id")]
+
+
+def _sync_rights_graph(asset_id: str, rights_context: dict[str, Any], neighbors: list[dict[str, Any]]) -> None:
+    graph_db = _graph_db()
+    if graph_db is None:
+        return
+    try:
+        graph_db.upsert_asset_context(asset_id=asset_id, metadata=rights_context, neighbors=neighbors)
+    except Exception:
+        logger.exception("Graph context sync failed for asset_id=%s", asset_id)
+
+
 def _xai_components() -> tuple[Any, Any, Any]:
     visual = getattr(app.state, "visual_explainer", None)
     graph_builder = getattr(app.state, "graph_builder", None)
@@ -309,6 +456,7 @@ async def fingerprint_image(
     register: bool = Form(False),
     asset_id: str | None = Form(None),
     source: str | None = Form(None),
+    rights_context_json: str | None = Form(None),
 ) -> FingerprintResponse:
     try:
         registry = _registry()
@@ -317,6 +465,17 @@ async def fingerprint_image(
 
         assigned_id = asset_id or str(uuid.uuid4())
         if register:
+            semantic = semantic_fp.embed_from_bytes(content)
+            semantic_neighbors: list[Any] = []
+            try:
+                semantic_neighbors = registry.match_semantic(
+                    semantic["embedding"],
+                    top_k=8,
+                    modality_filter="image",
+                )
+            except Exception:
+                semantic_neighbors = []
+
             registry.register_image(
                 asset_id=assigned_id,
                 hash_bytes=fp["hash_bytes"],
@@ -324,12 +483,29 @@ async def fingerprint_image(
             )
 
             # Stage-2 semantic registration for derivative-work matching.
-            semantic = semantic_fp.embed_from_bytes(content)
             registry.register_semantic(
                 asset_id=assigned_id,
                 embedding=semantic["embedding"],
                 metadata={"semantic_embedding_dim": semantic["embedding_dim"]},
             )
+
+            rights_context = _build_rights_context(
+                modality="image",
+                filename=file.filename,
+                source=source,
+                rights_context_json=rights_context_json,
+                fingerprint_hash=fp["hash_hex"],
+                fingerprint_kind="phash64",
+                embedding_vector=semantic["embedding"].tolist(),
+            )
+            neighbors = _match_results_to_neighbors(
+                semantic_neighbors,
+                model_name="resnet50_semantic",
+                model_version="2",
+                threshold=0.80,
+                match_context="image_registration",
+            )
+            _sync_rights_graph(asset_id=assigned_id, rights_context=rights_context, neighbors=neighbors)
 
         return FingerprintResponse(
             modality=Modality.image,
@@ -353,11 +529,22 @@ async def fingerprint_semantic_image(
     register: bool = Form(False),
     asset_id: str | None = Form(None),
     source: str | None = Form(None),
+    rights_context_json: str | None = Form(None),
 ) -> dict[str, Any]:
     try:
         registry = _registry()
         content = await file.read()
         semantic = semantic_fp.embed_from_bytes(content)
+        semantic_neighbors: list[Any] = []
+        if register:
+            try:
+                semantic_neighbors = registry.match_semantic(
+                    semantic["embedding"],
+                    top_k=8,
+                    modality_filter="image",
+                )
+            except Exception:
+                semantic_neighbors = []
 
         assigned_id = asset_id or str(uuid.uuid4())
         if register:
@@ -372,6 +559,24 @@ async def fingerprint_semantic_image(
                     "semantic_embedding_dim": semantic["embedding_dim"],
                 },
             )
+
+            rights_context = _build_rights_context(
+                modality="image",
+                filename=file.filename,
+                source=source,
+                rights_context_json=rights_context_json,
+                fingerprint_hash=None,
+                fingerprint_kind="semantic_only",
+                embedding_vector=semantic["embedding"].tolist(),
+            )
+            neighbors = _match_results_to_neighbors(
+                semantic_neighbors,
+                model_name="resnet50_semantic",
+                model_version="2",
+                threshold=0.80,
+                match_context="semantic_image_registration",
+            )
+            _sync_rights_graph(asset_id=assigned_id, rights_context=rights_context, neighbors=neighbors)
 
         return {
             "modality": "image",
@@ -391,6 +596,7 @@ async def fingerprint_video(
     register: bool = Form(False),
     asset_id: str | None = Form(None),
     source: str | None = Form(None),
+    rights_context_json: str | None = Form(None),
 ) -> FingerprintResponse:
     tmp_path = await _save_upload_to_temp(file, suffix=os.path.splitext(file.filename or "")[1])
     try:
@@ -399,22 +605,68 @@ async def fingerprint_video(
 
         assigned_id = asset_id or str(uuid.uuid4())
         if register:
+            pre_video_matches = registry.match_video_robust(fp.get("segment_hash_records", []), top_k=8)
+            if not pre_video_matches:
+                pre_video_matches = registry.match_video(fp["aggregate_hash_bytes"], top_k=8)
+
             registry.register_video(
                 asset_id=assigned_id,
                 hash_bytes=fp["aggregate_hash_bytes"],
+                hash_records=fp.get("segment_hash_records", []),
                 metadata={
                     "modality": "video",
                     "filename": file.filename,
                     "source": source,
                     "frames_sampled": fp["frames_sampled"],
+                    "sampling_profiles": fp.get("sampling_profiles"),
+                    "segment_count": fp.get("segment_count"),
+                    "blank_ratio": fp.get("quality", {}).get("blank_ratio"),
                 },
             )
+
+            # Register audio track fingerprint (when decodable) for cross-modal fusion.
+            try:
+                audio = audio_fp.fingerprint(tmp_path)
+                registry.register_audio(
+                    asset_id=assigned_id,
+                    embedding=audio["embedding"],
+                    metadata={
+                        "modality": "video_audio_track",
+                        "filename": file.filename,
+                        "source": source,
+                        "parent_modality": "video",
+                        "audio_embedding_dim": audio["embedding_dim"],
+                    },
+                )
+            except Exception:
+                pass
+
+            rights_context = _build_rights_context(
+                modality="video",
+                filename=file.filename,
+                source=source,
+                rights_context_json=rights_context_json,
+                fingerprint_hash=fp["aggregate_hash_hex"],
+                fingerprint_kind="video_robust_segmented_phash",
+                embedding_vector=None,
+            )
+            neighbors = _match_results_to_neighbors(
+                pre_video_matches,
+                model_name="video_robust_phash",
+                model_version="2",
+                threshold=0.75,
+                match_context="video_registration",
+            )
+            _sync_rights_graph(asset_id=assigned_id, rights_context=rights_context, neighbors=neighbors)
 
         return FingerprintResponse(
             modality=Modality.video,
             fingerprint={
                 "frames_sampled": fp["frames_sampled"],
                 "frame_hashes": fp["frame_hashes"],
+                "sampling_profiles": fp.get("sampling_profiles"),
+                "segment_count": fp.get("segment_count"),
+                "quality": fp.get("quality"),
                 "aggregate_hash_hex": fp["aggregate_hash_hex"],
                 "aggregate_hash_bits": fp["aggregate_hash_bits"],
                 "hash_size_bits": fp["hash_size_bits"],
@@ -437,6 +689,7 @@ async def fingerprint_audio(
     register: bool = Form(False),
     asset_id: str | None = Form(None),
     source: str | None = Form(None),
+    rights_context_json: str | None = Form(None),
 ) -> FingerprintResponse:
     tmp_path = await _save_upload_to_temp(file, suffix=os.path.splitext(file.filename or "")[1])
     try:
@@ -445,6 +698,8 @@ async def fingerprint_audio(
 
         assigned_id = asset_id or str(uuid.uuid4())
         if register:
+            pre_audio_matches = registry.match_audio(fp["embedding"], top_k=8)
+
             registry.register_audio(
                 asset_id=assigned_id,
                 embedding=fp["embedding"],
@@ -455,6 +710,24 @@ async def fingerprint_audio(
                     "fingerprint_id": fp["fingerprint_id"],
                 },
             )
+
+            rights_context = _build_rights_context(
+                modality="audio",
+                filename=file.filename,
+                source=source,
+                rights_context_json=rights_context_json,
+                fingerprint_hash=fp["fingerprint_id"],
+                fingerprint_kind="landmark_histogram",
+                embedding_vector=fp["embedding"].tolist(),
+            )
+            neighbors = _match_results_to_neighbors(
+                pre_audio_matches,
+                model_name="audio_landmark",
+                model_version="1",
+                threshold=0.70,
+                match_context="audio_registration",
+            )
+            _sync_rights_graph(asset_id=assigned_id, rights_context=rights_context, neighbors=neighbors)
 
         return FingerprintResponse(
             modality=Modality.audio,
@@ -504,13 +777,44 @@ async def match_asset(
         try:
             if modality == Modality.video:
                 fp = video_fp.fingerprint(tmp_path)
-                results = registry.match_video(fp["aggregate_hash_bytes"], top_k=top_k)
+                results = registry.match_video_robust(
+                    fp.get("segment_hash_records", []),
+                    top_k=top_k,
+                )
+                if not results:
+                    # Backward-compatible fallback when robust evidence is sparse.
+                    results = registry.match_video(fp["aggregate_hash_bytes"], top_k=top_k)
+
+                audio_fused = False
+                audio_fingerprint_id = None
+                try:
+                    audio_fp_result = audio_fp.fingerprint(tmp_path)
+                    audio_fingerprint_id = audio_fp_result["fingerprint_id"]
+                    audio_results = registry.match_audio(audio_fp_result["embedding"], top_k=top_k)
+                    audio_results = [
+                        r
+                        for r in audio_results
+                        if str(r.metadata.get("parent_modality") or "") == "video"
+                        or str(r.metadata.get("modality") or "") == "video_audio_track"
+                    ]
+
+                    if audio_results:
+                        results = registry.fuse_video_audio_matches(results, audio_results, top_k=top_k)
+                        audio_fused = True
+                except Exception:
+                    pass
+
                 return _match_results_to_schema(
                     modality=modality,
                     results=results,
                     query_summary={
                         "frames_sampled": fp["frames_sampled"],
+                        "sampling_profiles": fp.get("sampling_profiles"),
+                        "segment_count": fp.get("segment_count"),
+                        "blank_ratio": fp.get("quality", {}).get("blank_ratio"),
                         "aggregate_hash_hex": fp["aggregate_hash_hex"],
+                        "audio_fused": audio_fused,
+                        "audio_fingerprint_id": audio_fingerprint_id,
                     },
                 )
 
@@ -639,6 +943,41 @@ async def log_calibration_sample(
         "logged": True,
         "samples": len(monitor.get("preds", [])),
     }
+
+
+@app.post("/rights/enforcement/flagged-cooccurrence")
+async def register_flagged_cooccurrence(
+    asset_id: str = Form(...),
+    related_asset_id: str = Form(...),
+    confidence: float = Form(1.0),
+    evidence_source: str = Form("enforcement_action"),
+    case_id: str | None = Form(None),
+    timestamp_ms: int | None = Form(None),
+) -> dict[str, Any]:
+    graph_db = _graph_db()
+    if graph_db is None:
+        raise HTTPException(status_code=503, detail="Graph database is not initialized")
+
+    confidence = float(min(max(confidence, 0.0), 1.0))
+    try:
+        graph_db.link_flagged_assets(
+            asset_id=asset_id,
+            related_asset_id=related_asset_id,
+            confidence=confidence,
+            evidence_source=evidence_source,
+            case_id=case_id,
+            timestamp_ms=timestamp_ms,
+        )
+        return {
+            "registered": True,
+            "asset_id": asset_id,
+            "related_asset_id": related_asset_id,
+            "confidence": confidence,
+            "evidence_source": evidence_source,
+            "case_id": case_id,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to register flagged evidence: {exc}") from exc
 
 
 @app.get("/metrics")

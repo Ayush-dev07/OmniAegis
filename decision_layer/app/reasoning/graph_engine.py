@@ -31,9 +31,9 @@ class HeteroGATReasoner(nn.Module):
         self.dropout = dropout
 
         # Per-node-type input projections.
-        self.asset_proj = nn.Linear(512, hidden_dim)
-        self.creator_proj = nn.Linear(2, hidden_dim)
-        self.licensee_proj = nn.Linear(1, hidden_dim)
+        self.asset_proj = nn.Linear(520, hidden_dim)
+        self.creator_proj = nn.Linear(6, hidden_dim)
+        self.licensee_proj = nn.Linear(4, hidden_dim)
 
         self.conv1 = HeteroConv(
             {
