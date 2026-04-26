@@ -3,7 +3,10 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from app.schemas import MerkleProofResponse
+try:
+    from decision_layer.app.schemas import MerkleProofResponse
+except ModuleNotFoundError:  # pragma: no cover
+    from app.schemas import MerkleProofResponse
 
 router = APIRouter(tags=["audit"])
 

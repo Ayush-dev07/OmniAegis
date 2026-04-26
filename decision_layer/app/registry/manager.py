@@ -24,6 +24,7 @@ class RegistryManager:
     - Image/Video: 64D binary fingerprint vectors stored in Qdrant.
     - Audio: normalized embedding vectors stored in Qdrant.
     - Semantic image vectors: normalized embeddings stored in Qdrant.
+    - Video robust mode: stores segment+profile points for coverage-aware matching.
     """
 
     def __init__(
@@ -117,6 +118,12 @@ class RegistryManager:
         digest = hashlib.sha1(asset_id.encode("utf-8")).digest()
         return int.from_bytes(digest[:8], byteorder="big", signed=False)
 
+    @staticmethod
+    def _point_id(asset_id: str, collection_name: str, point_key: str = "") -> int:
+        """Return deterministic point ids with per-record uniqueness."""
+        digest = hashlib.sha1(f"{collection_name}:{asset_id}:{point_key}".encode("utf-8")).digest()
+        return int.from_bytes(digest[:8], byteorder="big", signed=False)
+
     def register_image(self, asset_id: str, hash_bytes: np.ndarray, metadata: dict[str, Any]) -> None:
         if self.qdrant is None:
             raise RuntimeError("Qdrant client is not initialized")
@@ -129,7 +136,7 @@ class RegistryManager:
                 collection_name=self.image_collection_name,
                 points=[
                     qmodels.PointStruct(
-                        id=self._semantic_point_id(asset_id),
+                        id=self._point_id(asset_id, self.image_collection_name, "image_hash"),
                         vector=vector.tolist(),
                         payload=payload,
                     )
@@ -140,23 +147,69 @@ class RegistryManager:
             existing = self.metadata_store.get(asset_id, {})
             self.metadata_store[asset_id] = {**existing, **metadata}
 
-    def register_video(self, asset_id: str, hash_bytes: np.ndarray, metadata: dict[str, Any]) -> None:
+    def register_video(
+        self,
+        asset_id: str,
+        hash_bytes: np.ndarray | None,
+        metadata: dict[str, Any],
+        hash_records: list[dict[str, Any]] | None = None,
+    ) -> None:
         if self.qdrant is None:
             raise RuntimeError("Qdrant client is not initialized")
 
         with self._lock:
-            vector = self._binary_hash_to_vector(hash_bytes)
-            payload = {"asset_id": asset_id, **metadata}
+            points: list[qmodels.PointStruct] = []
 
-            self.qdrant.upsert(
-                collection_name=self.video_collection_name,
-                points=[
+            if hash_records:
+                for rec in hash_records:
+                    rec_hash = rec.get("hash_bytes")
+                    if rec_hash is None:
+                        continue
+
+                    vector = self._binary_hash_to_vector(np.asarray(rec_hash, dtype=np.uint8))
+                    profile_id = int(rec.get("profile_id", -1))
+                    segment_idx = int(rec.get("segment_idx", -1))
+                    point_key = f"segment:{profile_id}:{segment_idx}"
+                    rec_payload = {
+                        "asset_id": asset_id,
+                        "fingerprint_kind": "segment",
+                        "profile_id": profile_id,
+                        "segment_idx": segment_idx,
+                        "segment_start_sec": float(rec.get("segment_start_sec", -1.0)),
+                        "segment_end_sec": float(rec.get("segment_end_sec", -1.0)),
+                        **metadata,
+                    }
+                    points.append(
+                        qmodels.PointStruct(
+                            id=self._point_id(asset_id, self.video_collection_name, point_key),
+                            vector=vector.tolist(),
+                            payload=rec_payload,
+                        )
+                    )
+
+            if hash_bytes is not None:
+                vector = self._binary_hash_to_vector(hash_bytes)
+                payload = {
+                    "asset_id": asset_id,
+                    "fingerprint_kind": "aggregate",
+                    "profile_id": -1,
+                    "segment_idx": -1,
+                    **metadata,
+                }
+                points.append(
                     qmodels.PointStruct(
-                        id=self._semantic_point_id(asset_id),
+                        id=self._point_id(asset_id, self.video_collection_name, "aggregate"),
                         vector=vector.tolist(),
                         payload=payload,
                     )
-                ],
+                )
+
+            if not points:
+                raise ValueError("No video fingerprints provided for registration")
+
+            self.qdrant.upsert(
+                collection_name=self.video_collection_name,
+                points=points,
                 wait=False,
             )
 
@@ -177,7 +230,7 @@ class RegistryManager:
                 collection_name=self.audio_collection_name,
                 points=[
                     qmodels.PointStruct(
-                        id=self._semantic_point_id(asset_id),
+                        id=self._point_id(asset_id, self.audio_collection_name, "audio_embedding"),
                         vector=row[0].tolist(),
                         payload=payload,
                     )
@@ -205,7 +258,7 @@ class RegistryManager:
                 collection_name=self.semantic_collection_name,
                 points=[
                     qmodels.PointStruct(
-                        id=self._semantic_point_id(asset_id),
+                        id=self._point_id(asset_id, self.semantic_collection_name, "semantic_embedding"),
                         vector=row[0].tolist(),
                         payload=payload,
                     )
@@ -256,11 +309,20 @@ class RegistryManager:
 
         with self._lock:
             query = self._binary_hash_to_vector(hash_bytes)
+            query_filter = qmodels.Filter(
+                must=[
+                    qmodels.FieldCondition(
+                        key="fingerprint_kind",
+                        match=qmodels.MatchValue(value="aggregate"),
+                    )
+                ]
+            )
 
             response = self.qdrant.query_points(
                 collection_name=self.video_collection_name,
                 query=query.tolist(),
                 limit=top_k,
+                query_filter=query_filter,
                 with_payload=True,
                 with_vectors=False,
             )
@@ -281,6 +343,235 @@ class RegistryManager:
                     )
                 )
             return results
+
+    def match_video_robust(
+        self,
+        hash_records: list[dict[str, Any]],
+        top_k: int = 5,
+        per_record_limit: int = 6,
+        min_profile_hits: int = 2,
+        min_segment_coverage: float = 0.2,
+    ) -> list[MatchResult]:
+        if self.qdrant is None:
+            raise RuntimeError("Qdrant client is not initialized")
+
+        if not hash_records:
+            return []
+
+        with self._lock:
+            query_segments = {
+                int(r.get("segment_idx", -1)) for r in hash_records if int(r.get("segment_idx", -1)) >= 0
+            }
+            query_profiles = {int(r.get("profile_id", -1)) for r in hash_records}
+
+            candidate_stats: dict[str, dict[str, Any]] = {}
+
+            for rec in hash_records:
+                rec_hash = rec.get("hash_bytes")
+                if rec_hash is None:
+                    continue
+
+                profile_id = int(rec.get("profile_id", -1))
+                segment_idx = int(rec.get("segment_idx", -1))
+
+                query_vector = self._binary_hash_to_vector(np.asarray(rec_hash, dtype=np.uint8))
+                query_filter = qmodels.Filter(
+                    must=[
+                        qmodels.FieldCondition(
+                            key="fingerprint_kind",
+                            match=qmodels.MatchValue(value="segment"),
+                        ),
+                        qmodels.FieldCondition(
+                            key="profile_id",
+                            match=qmodels.MatchValue(value=profile_id),
+                        ),
+                    ]
+                )
+
+                response = self.qdrant.query_points(
+                    collection_name=self.video_collection_name,
+                    query=query_vector.tolist(),
+                    limit=max(per_record_limit, top_k),
+                    query_filter=query_filter,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+
+                best_by_asset: dict[str, tuple[float, dict[str, Any]]] = {}
+                for point in response.points:
+                    payload = dict(point.payload or {})
+                    asset_id = str(payload.get("asset_id") or point.id)
+                    score = float(point.score)
+                    current = best_by_asset.get(asset_id)
+                    if current is None or score > current[0]:
+                        best_by_asset[asset_id] = (score, payload)
+
+                for asset_id, (score, payload) in best_by_asset.items():
+                    stats = candidate_stats.setdefault(
+                        asset_id,
+                        {
+                            "score_sum": 0.0,
+                            "hits": 0,
+                            "matched_profiles": set(),
+                            "matched_query_segments": set(),
+                            "metadata": payload,
+                        },
+                    )
+                    stats["score_sum"] += score
+                    stats["hits"] += 1
+                    stats["matched_profiles"].add(profile_id)
+                    if segment_idx >= 0:
+                        stats["matched_query_segments"].add(segment_idx)
+
+            if not candidate_stats:
+                return []
+
+            total_segments = max(len(query_segments), 1)
+            total_profiles = max(len(query_profiles), 1)
+
+            scored: list[MatchResult] = []
+            for asset_id, stats in candidate_stats.items():
+                hit_count = int(stats["hits"])
+                if hit_count <= 0:
+                    continue
+
+                avg_score = float(stats["score_sum"] / hit_count)
+                avg_score_01 = max(0.0, min(1.0, (avg_score + 1.0) / 2.0))
+
+                profile_hits = len(stats["matched_profiles"])
+                segment_coverage = len(stats["matched_query_segments"]) / total_segments
+                profile_coverage = profile_hits / total_profiles
+
+                if total_profiles >= min_profile_hits and profile_hits < min_profile_hits:
+                    continue
+                if segment_coverage < min_segment_coverage:
+                    continue
+
+                confidence = (
+                    0.55 * avg_score_01
+                    + 0.30 * max(0.0, min(1.0, segment_coverage))
+                    + 0.15 * max(0.0, min(1.0, profile_coverage))
+                )
+                confidence = max(0.0, min(1.0, confidence))
+
+                metadata = dict(stats["metadata"])
+                metadata.update(
+                    {
+                        "robust_profile_hits": profile_hits,
+                        "robust_segment_coverage": float(segment_coverage),
+                        "robust_profile_coverage": float(profile_coverage),
+                        "robust_hit_count": hit_count,
+                    }
+                )
+
+                scored.append(
+                    MatchResult(
+                        asset_id=asset_id,
+                        confidence=confidence,
+                        distance_or_similarity=avg_score,
+                        metadata=metadata,
+                    )
+                )
+
+            scored.sort(
+                key=lambda r: (
+                    float(r.confidence),
+                    float(r.distance_or_similarity),
+                ),
+                reverse=True,
+            )
+            return scored[:top_k]
+
+    @staticmethod
+    def fuse_video_audio_matches(
+        video_results: list[MatchResult],
+        audio_results: list[MatchResult],
+        top_k: int = 5,
+        video_weight: float = 0.7,
+        audio_weight: float = 0.3,
+    ) -> list[MatchResult]:
+        by_asset: dict[str, dict[str, Any]] = {}
+
+        for vr in video_results:
+            by_asset[vr.asset_id] = {
+                "video": vr,
+                "audio": None,
+            }
+
+        for ar in audio_results:
+            bucket = by_asset.setdefault(ar.asset_id, {"video": None, "audio": None})
+            bucket["audio"] = ar
+
+        fused: list[MatchResult] = []
+        for asset_id, bucket in by_asset.items():
+            vr = bucket["video"]
+            ar = bucket["audio"]
+
+            video_conf = float(vr.confidence) if vr is not None else 0.0
+            audio_conf = float(ar.confidence) if ar is not None else 0.0
+            both_present = vr is not None and ar is not None
+
+            confidence = (video_weight * video_conf) + (audio_weight * audio_conf)
+            if both_present:
+                confidence = min(1.0, confidence + 0.05)
+
+            if vr is not None and ar is not None:
+                score = (video_weight * float(vr.distance_or_similarity)) + (
+                    audio_weight * float(ar.distance_or_similarity)
+                )
+                metadata = {
+                    **vr.metadata,
+                    "audio_match": ar.metadata,
+                    "fusion": {
+                        "method": "weighted_video_audio",
+                        "video_weight": float(video_weight),
+                        "audio_weight": float(audio_weight),
+                        "video_confidence": video_conf,
+                        "audio_confidence": audio_conf,
+                    },
+                }
+            elif vr is not None:
+                score = float(vr.distance_or_similarity)
+                metadata = {
+                    **vr.metadata,
+                    "fusion": {
+                        "method": "video_only",
+                        "video_weight": float(video_weight),
+                        "audio_weight": float(audio_weight),
+                        "video_confidence": video_conf,
+                        "audio_confidence": 0.0,
+                    },
+                }
+            else:
+                score = float(ar.distance_or_similarity)
+                metadata = {
+                    **ar.metadata,
+                    "fusion": {
+                        "method": "audio_only",
+                        "video_weight": float(video_weight),
+                        "audio_weight": float(audio_weight),
+                        "video_confidence": 0.0,
+                        "audio_confidence": audio_conf,
+                    },
+                }
+
+            fused.append(
+                MatchResult(
+                    asset_id=asset_id,
+                    confidence=max(0.0, min(1.0, confidence)),
+                    distance_or_similarity=score,
+                    metadata=metadata,
+                )
+            )
+
+        fused.sort(
+            key=lambda r: (
+                float(r.confidence),
+                float(r.distance_or_similarity),
+            ),
+            reverse=True,
+        )
+        return fused[:top_k]
 
     def match_audio(self, embedding: np.ndarray, top_k: int = 5) -> list[MatchResult]:
         if self.qdrant is None:
