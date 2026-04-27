@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from app.auth_api import AuthUser, get_current_user, require_admin
 from app.schemas import MerkleProofResponse
 
 router = APIRouter(tags=["audit"])
@@ -74,7 +75,11 @@ class AnchorPolicyResponse(BaseModel):
 
 
 @router.get("/get-merkle-proof/{decision_id}", response_model=MerkleProofResponse)
-async def get_merkle_proof(decision_id: str, request: Request) -> MerkleProofResponse:
+async def get_merkle_proof(
+    decision_id: str,
+    request: Request,
+    _current_user: AuthUser = Depends(get_current_user),
+) -> MerkleProofResponse:
     """Returns the Merkle proof path for a decision anchored by BatchCoordinator."""
     coordinator = getattr(request.app.state, "batch_coordinator", None)
     if coordinator is None:
@@ -90,7 +95,12 @@ async def get_merkle_proof(decision_id: str, request: Request) -> MerkleProofRes
 
 
 @router.post("/dispute/{asset_hash}", response_model=DisputeResponse)
-async def create_dispute(asset_hash: str, body: DisputeRequest, request: Request) -> DisputeResponse:
+async def create_dispute(
+    asset_hash: str,
+    body: DisputeRequest,
+    request: Request,
+    _current_user: AuthUser = Depends(get_current_user),
+) -> DisputeResponse:
     """Creates a dispute for a decision with on-chain status and Merkle proof."""
     coordinator = getattr(request.app.state, "batch_coordinator", None)
     if coordinator is None:
@@ -104,7 +114,11 @@ async def create_dispute(asset_hash: str, body: DisputeRequest, request: Request
 
 
 @router.post("/propose-policy", response_model=PolicyProposalResponse)
-async def propose_policy(body: PolicyProposalRequest, request: Request) -> PolicyProposalResponse:
+async def propose_policy(
+    body: PolicyProposalRequest,
+    request: Request,
+    _current_user: AuthUser = Depends(require_admin),
+) -> PolicyProposalResponse:
     """Creates a governance policy proposal awaiting signature collection (2-of-3 required)."""
     coordinator = getattr(request.app.state, "batch_coordinator", None)
     if coordinator is None:
@@ -118,7 +132,11 @@ async def propose_policy(body: PolicyProposalRequest, request: Request) -> Polic
 
 
 @router.post("/collect-signature", response_model=CollectSignatureResponse)
-async def collect_signature(body: CollectSignatureRequest, request: Request) -> CollectSignatureResponse:
+async def collect_signature(
+    body: CollectSignatureRequest,
+    request: Request,
+    _current_user: AuthUser = Depends(require_admin),
+) -> CollectSignatureResponse:
     """Collects and validates a signature for a policy proposal."""
     coordinator = getattr(request.app.state, "batch_coordinator", None)
     if coordinator is None:
@@ -140,7 +158,11 @@ async def collect_signature(body: CollectSignatureRequest, request: Request) -> 
 
 
 @router.post("/anchor-policy", response_model=AnchorPolicyResponse)
-async def anchor_policy(body: AnchorPolicyRequest, request: Request) -> AnchorPolicyResponse:
+async def anchor_policy(
+    body: AnchorPolicyRequest,
+    request: Request,
+    _current_user: AuthUser = Depends(require_admin),
+) -> AnchorPolicyResponse:
     """Anchors a policy proposal on-chain after 2-of-3 signatures collected."""
     coordinator = getattr(request.app.state, "batch_coordinator", None)
     if coordinator is None:

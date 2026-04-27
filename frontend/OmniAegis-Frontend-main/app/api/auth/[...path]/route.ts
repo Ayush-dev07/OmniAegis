@@ -6,17 +6,14 @@ const BACKEND_API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ||
   process.env.NEXT_PUBLIC_API_URL ||
   process.env.NEXT_PUBLIC_BACKEND_URL ||
-  'https://api.omniaegis.com';
+  'http://localhost:8000';
 
 function normalizeBackendBaseUrl(baseUrl: string): string {
   try {
     const url = new URL(baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`);
-    if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') {
-      return 'https://api.omniaegis.com';
-    }
     return url.toString().replace(/\/$/, '');
   } catch {
-    return 'https://api.omniaegis.com';
+    return 'http://localhost:8000';
   }
 }
 

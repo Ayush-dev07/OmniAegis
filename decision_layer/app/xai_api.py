@@ -3,8 +3,10 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
+
+from app.auth_api import AuthUser, get_current_user
 
 try:
     from decision_layer.services.xai_drift import KSDriftDetector
@@ -69,7 +71,11 @@ class UMAPProjectionResponse(BaseModel):
 
 
 @router.post("/explanations/log")
-async def log_explanation(body: ExplanationLogRequest, request: Request) -> dict[str, Any]:
+async def log_explanation(
+    body: ExplanationLogRequest,
+    request: Request,
+    _current_user: AuthUser = Depends(get_current_user),
+) -> dict[str, Any]:
     """Log an explanation vector and outcome pair."""
     storage = getattr(request.app.state, "xai_storage", None)
     if storage is None:
@@ -92,7 +98,11 @@ async def log_explanation(body: ExplanationLogRequest, request: Request) -> dict
 
 
 @router.post("/drift/detect", response_model=DriftDetectionResponse)
-async def detect_drift(body: DriftDetectionRequest, request: Request) -> DriftDetectionResponse:
+async def detect_drift(
+    body: DriftDetectionRequest,
+    request: Request,
+    _current_user: AuthUser = Depends(get_current_user),
+) -> DriftDetectionResponse:
     """Perform KS test on SHAP distributions between current and reference periods."""
     storage = getattr(request.app.state, "xai_storage", None)
     if storage is None:
@@ -152,6 +162,7 @@ async def detect_drift(body: DriftDetectionRequest, request: Request) -> DriftDe
 async def project_embeddings_umap(
     body: UMAPProjectionRequest,
     request: Request,
+    _current_user: AuthUser = Depends(get_current_user),
 ) -> UMAPProjectionResponse:
     """Project 512D embeddings to 2D UMAP space with caching."""
     projector = getattr(request.app.state, "umap_projector", None)
@@ -169,7 +180,10 @@ async def project_embeddings_umap(
 
 
 @router.get("/health/drift")
-async def drift_detection_health(request: Request) -> dict[str, str]:
+async def drift_detection_health(
+    request: Request,
+    _current_user: AuthUser = Depends(get_current_user),
+) -> dict[str, str]:
     """Health check for drift detection service."""
     storage = getattr(request.app.state, "xai_storage", None)
     if storage is None:
@@ -178,7 +192,10 @@ async def drift_detection_health(request: Request) -> dict[str, str]:
 
 
 @router.get("/health/umap")
-async def umap_health(request: Request) -> dict[str, str]:
+async def umap_health(
+    request: Request,
+    _current_user: AuthUser = Depends(get_current_user),
+) -> dict[str, str]:
     """Health check for UMAP projector service."""
     projector = getattr(request.app.state, "umap_projector", None)
     if projector is None:

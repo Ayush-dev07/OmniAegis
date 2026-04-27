@@ -3,6 +3,7 @@
 # Node / Frontend
 
 # =========================
+*.json
 
 node_modules/
 node_modules/.bin

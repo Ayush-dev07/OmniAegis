@@ -1,132 +1,25 @@
 from __future__ import annotations
 
-import base64
-import hashlib
-import hmac
 import json
+import logging
 import os
-import time
-import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from threading import Lock
 from typing import Any
 
-import httpx
-from fastapi import APIRouter, Header, HTTPException
+import firebase_admin
+from fastapi import APIRouter, Depends, Header, HTTPException
+from firebase_admin import auth as firebase_auth
+from firebase_admin import credentials
+from firebase_admin import firestore
+from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
-from pydantic import BaseModel, Field
 
 
 router = APIRouter(prefix="/auth", tags=["auth"])
-
-
-def _b64url_encode(raw: bytes) -> str:
-    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
-
-
-def _b64url_decode(raw: str) -> bytes:
-    padding = "=" * ((4 - len(raw) % 4) % 4)
-    return base64.urlsafe_b64decode((raw + padding).encode("ascii"))
-
-
-def _normalize_email(email: str) -> str:
-    normalized = email.strip().lower()
-    if "@" not in normalized or normalized.startswith("@") or normalized.endswith("@"):
-        raise HTTPException(status_code=400, detail="Invalid email format")
-    return normalized
-
-
-def _auth_secret() -> str:
-    return (
-        os.getenv("AUTH_TOKEN_SECRET")
-        or os.getenv("SUPABASE_SERVICE_KEY")
-        or "dev-insecure-auth-secret-change-me"
-    )
-
-
-def _hash_password(password: str, iterations: int = 210_000) -> str:
-    salt = os.urandom(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
-    return f"pbkdf2_sha256${iterations}${salt.hex()}${digest.hex()}"
-
-
-def _verify_password(password: str, encoded: str) -> bool:
-    try:
-        scheme, iterations, salt_hex, digest_hex = encoded.split("$", 3)
-        if scheme != "pbkdf2_sha256":
-            return False
-        candidate = hashlib.pbkdf2_hmac(
-            "sha256",
-            password.encode("utf-8"),
-            bytes.fromhex(salt_hex),
-            int(iterations),
-        ).hex()
-        return hmac.compare_digest(candidate, digest_hex)
-    except Exception:
-        return False
-
-
-def _create_access_token(
-    user_id: str,
-    email: str,
-    role: str,
-    name: str,
-    ttl_seconds: int = 60 * 60 * 24 * 7,
-) -> str:
-    now = int(time.time())
-    payload = {
-        "sub": user_id,
-        "email": email,
-        "role": role,
-        "name": name,
-        "iat": now,
-        "exp": now + ttl_seconds,
-    }
-    payload_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    payload_b64 = _b64url_encode(payload_bytes)
-    sig = hmac.new(_auth_secret().encode("utf-8"), payload_b64.encode("ascii"), hashlib.sha256).digest()
-    return f"{payload_b64}.{_b64url_encode(sig)}"
-
-
-def _decode_access_token(token: str) -> dict[str, Any]:
-    try:
-        payload_b64, sig_b64 = token.split(".", 1)
-    except ValueError as exc:
-        raise HTTPException(status_code=401, detail="Malformed token") from exc
-
-    expected_sig = hmac.new(
-        _auth_secret().encode("utf-8"), payload_b64.encode("ascii"), hashlib.sha256
-    ).digest()
-    actual_sig = _b64url_decode(sig_b64)
-    if not hmac.compare_digest(expected_sig, actual_sig):
-        raise HTTPException(status_code=401, detail="Invalid token signature")
-
-    payload = json.loads(_b64url_decode(payload_b64).decode("utf-8"))
-    if int(payload.get("exp", 0)) < int(time.time()):
-        raise HTTPException(status_code=401, detail="Token expired")
-    return payload
-
-
-def _extract_bearer_token(authorization: str | None) -> str:
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
-
-    parts = authorization.split(" ", 1)
-    if len(parts) != 2 or parts[0].lower() != "bearer":
-        raise HTTPException(status_code=401, detail="Authorization must be Bearer token")
-
-    token = parts[1].strip()
-    if not token:
-        raise HTTPException(status_code=401, detail="Missing bearer token")
-    return token
-
-
-@dataclass
-class SupabaseConfig:
-    url: str
-    service_key: str
-    users_table: str = "users"
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -134,25 +27,6 @@ class AuthQdrantConfig:
     url: str
     api_key: str
     collection_name: str = "auth_users"
-
-
-class SignupRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=120)
-    email: str = Field(min_length=3, max_length=320)
-    password: str = Field(min_length=8, max_length=256)
-    role: str = Field(default="reviewer", pattern="^(admin|reviewer)$")
-
-
-class LoginRequest(BaseModel):
-    email: str = Field(min_length=3, max_length=320)
-    password: str = Field(min_length=8, max_length=256)
-
-
-class GoogleAuthRequest(BaseModel):
-    mode: str = Field(pattern="^(login|signup)$")
-    email: str = Field(min_length=3, max_length=320)
-    name: str = Field(min_length=1, max_length=120)
-    google_sub: str | None = Field(default=None, min_length=1, max_length=255)
 
 
 class AuthUser(BaseModel):
@@ -168,67 +42,9 @@ class AuthResponse(BaseModel):
     token_type: str = "bearer"
 
 
-class _SupabaseUsersClient:
-    def __init__(self, config: SupabaseConfig) -> None:
-        self._config = config
-        self._table_url = f"{config.url.rstrip('/')}/rest/v1/{config.users_table}"
-
-    def _headers(self, *, returning: bool = False) -> dict[str, str]:
-        headers = {
-            "apikey": self._config.service_key,
-            "Authorization": f"Bearer {self._config.service_key}",
-            "Content-Type": "application/json",
-        }
-        if returning:
-            headers["Prefer"] = "return=representation"
-        return headers
-
-    async def get_user_by_email(self, email: str) -> dict[str, Any] | None:
-        select = "user_id,email,role,name,password_hash,provider,google_sub"
-        params = {
-            "email": f"eq.{email}",
-            "select": select,
-            "limit": "1",
-        }
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(self._table_url, headers=self._headers(), params=params)
-
-        if response.status_code >= 400:
-            raise RuntimeError(f"Supabase query failed: {response.status_code} {response.text}")
-
-        rows = response.json()
-        if not rows:
-            return None
-        return rows[0]
-
-    async def create_user(self, payload: dict[str, Any]) -> dict[str, Any]:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                self._table_url,
-                headers=self._headers(returning=True),
-                json=payload,
-            )
-
-        if response.status_code >= 400:
-            if response.status_code == 409:
-                raise ValueError("User already exists")
-            raise RuntimeError(f"Supabase insert failed: {response.status_code} {response.text}")
-
-        rows = response.json()
-        if not rows:
-            raise RuntimeError("Supabase did not return created user")
-        return rows[0]
-
-    async def delete_user_by_id(self, user_id: str) -> None:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.delete(
-                self._table_url,
-                headers=self._headers(),
-                params={"user_id": f"eq.{user_id}"},
-            )
-
-        if response.status_code >= 400:
-            raise RuntimeError(f"Supabase delete failed: {response.status_code} {response.text}")
+class SyncRequest(BaseModel):
+    name: str | None = Field(default=None, max_length=120)
+    provider: str | None = Field(default=None, max_length=32)
 
 
 class _QdrantAuthLinkClient:
@@ -251,7 +67,7 @@ class _QdrantAuthLinkClient:
     def _get_client(cls) -> QdrantClient:
         if cls._client is None:
             cfg = cls._config()
-            cls._client = QdrantClient(url=cfg.url, api_key=cfg.api_key)
+            cls._client = QdrantClient(url=cfg.url, api_key=cfg.api_key, timeout=float(os.getenv("QDRANT_TIMEOUT_SECONDS", "5")))
         return cls._client
 
     @classmethod
@@ -289,153 +105,239 @@ class _QdrantAuthLinkClient:
         cfg = cls._ensure_collection()
         user_id = str(row["user_id"])
         client = cls._get_client()
-        client.upsert(
-            collection_name=cfg.collection_name,
-            points=[
-                qmodels.PointStruct(
-                    id=user_id,
-                    vector=[1.0],
-                    payload={
-                        "user_id": user_id,
-                        "email": str(row.get("email") or ""),
-                        "role": str(row.get("role") or "reviewer"),
-                        "name": str(row.get("name") or "User"),
-                        "provider": str(row.get("provider") or "password"),
-                        "google_sub": row.get("google_sub"),
-                    },
-                )
-            ],
-            wait=True,
+        try:
+            client.upsert(
+                collection_name=cfg.collection_name,
+                points=[
+                    qmodels.PointStruct(
+                        id=user_id,
+                        vector=[1.0],
+                        payload={
+                            "user_id": user_id,
+                            "email": str(row.get("email") or ""),
+                            "role": str(row.get("role") or "reviewer"),
+                            "name": str(row.get("name") or "User"),
+                            "provider": str(row.get("provider") or "password"),
+                        },
+                    )
+                ],
+                wait=False,
+            )
+        except Exception as exc:
+            logger.warning("Skipping Qdrant auth user sync for %s: %s", user_id, exc)
+
+
+def _normalize_email(email: str) -> str:
+    normalized = email.strip().lower()
+    if "@" not in normalized or normalized.startswith("@") or normalized.endswith("@"):
+        raise HTTPException(status_code=400, detail="Invalid email format")
+    return normalized
+
+
+def _extract_bearer_token(authorization: str | None) -> str:
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+    parts = authorization.split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Authorization must be Bearer token")
+
+    token = parts[1].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+    return token
+
+
+def _admin_email() -> str:
+    return (os.getenv("AUTH_ADMIN_EMAIL") or "admin@sentinelai.com").strip().lower()
+
+
+def _profile_collection_name() -> str:
+    return (os.getenv("FIRESTORE_USERS_COLLECTION") or "users").strip()
+
+
+def _build_firebase_app() -> firebase_admin.App:
+    existing = firebase_admin._apps.get("[DEFAULT]")
+    if existing is not None:
+        return existing
+
+    project_id = (os.getenv("FIREBASE_PROJECT_ID") or "").strip()
+    credentials_json = (os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON") or "").strip()
+    credentials_path = (os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH") or "").strip()
+
+    if credentials_json:
+        cred = credentials.Certificate(json.loads(credentials_json))
+    elif credentials_path:
+        raw_path = Path(credentials_path)
+        if raw_path.is_absolute() and raw_path.exists():
+            resolved_path = raw_path
+        else:
+            current = Path(__file__).resolve()
+            decision_layer_root = current.parents[1]
+            workspace_root = decision_layer_root.parent
+            candidates = [
+                (Path.cwd() / raw_path).resolve(),
+                (workspace_root / raw_path).resolve(),
+                (decision_layer_root / raw_path).resolve(),
+            ]
+            resolved_path = next((candidate for candidate in candidates if candidate.exists()), raw_path)
+
+        cred = credentials.Certificate(str(resolved_path))
+    else:
+        raise HTTPException(
+            status_code=503,
+            detail="Firebase credentials are missing. Set FIREBASE_SERVICE_ACCOUNT_JSON or FIREBASE_SERVICE_ACCOUNT_PATH",
         )
 
+    options: dict[str, Any] = {}
+    if project_id:
+        options["projectId"] = project_id
 
-def _supabase_client() -> _SupabaseUsersClient:
-    url = (os.getenv("SUPABASE_URL") or "").strip().strip('"')
-    service_key = (os.getenv("SUPABASE_SERVICE_KEY") or "").strip().strip('"')
-    users_table = (os.getenv("SUPABASE_USERS_TABLE") or "users").strip()
+    return firebase_admin.initialize_app(cred, options=options)
 
-    if not url or not service_key:
-        raise HTTPException(status_code=503, detail="SUPABASE_URL and SUPABASE_SERVICE_KEY are required")
 
-    return _SupabaseUsersClient(
-        SupabaseConfig(url=url, service_key=service_key, users_table=users_table),
+def _firestore_client() -> firestore.Client:
+    app = _build_firebase_app()
+    return firestore.client(app=app)
+
+
+def _verify_firebase_token(token: str) -> dict[str, Any]:
+    try:
+        _build_firebase_app()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Firebase Admin initialization failed") from exc
+
+    try:
+        decoded = firebase_auth.verify_id_token(token)
+        return decoded
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Invalid or expired Firebase token") from exc
+
+
+def _provider_from_claims(claims: dict[str, Any], fallback: str | None = None) -> str:
+    if fallback:
+        return fallback
+
+    firebase_section = claims.get("firebase")
+    if isinstance(firebase_section, dict):
+        identities = firebase_section.get("identities")
+        if isinstance(identities, dict):
+            if "google.com" in identities:
+                return "google"
+            if "password" in identities:
+                return "password"
+
+    return "unknown"
+
+
+def _build_auth_user_from_claims(claims: dict[str, Any], profile: dict[str, Any] | None) -> AuthUser:
+    uid = str(claims.get("uid") or "")
+    if not uid:
+        raise HTTPException(status_code=401, detail="Token missing uid")
+
+    raw_email = str(claims.get("email") or ((profile or {}).get("email") or ""))
+    email = _normalize_email(raw_email)
+    name = str((profile or {}).get("name") or claims.get("name") or email.split("@")[0]).strip()
+    role = str((profile or {}).get("role") or ("admin" if email == _admin_email() else "reviewer"))
+
+    if role not in {"admin", "reviewer"}:
+        role = "reviewer"
+
+    return AuthUser(
+        user_id=uid,
+        email=email,
+        role=role,
+        name=name or "User",
     )
 
 
-def _auth_response_from_row(row: dict[str, Any]) -> AuthResponse:
-    user = AuthUser(
-        user_id=str(row["user_id"]),
-        email=_normalize_email(str(row["email"])),
-        role=str(row.get("role") or "reviewer"),
-        name=str(row.get("name") or "User"),
+def _upsert_firestore_profile(claims: dict[str, Any], body: SyncRequest | None = None) -> AuthUser:
+    uid = str(claims.get("uid") or "")
+    if not uid:
+        raise HTTPException(status_code=401, detail="Token missing uid")
+
+    user = _build_auth_user_from_claims(claims, None)
+    provider = _provider_from_claims(claims, body.provider if body is not None else None)
+
+    if body is not None and body.name and body.name.strip():
+        user = AuthUser(
+            user_id=user.user_id,
+            email=user.email,
+            role=user.role,
+            name=body.name.strip(),
+        )
+
+    try:
+        db = _firestore_client()
+        users = db.collection(_profile_collection_name())
+        doc_ref = users.document(uid)
+        payload = {
+            "user_id": user.user_id,
+            "email": user.email,
+            "name": user.name,
+            "role": user.role,
+            "provider": provider,
+            "updated_at": firestore.SERVER_TIMESTAMP,
+        }
+        doc_ref.set(payload, merge=True)
+    except Exception as exc:
+        logger.warning("Firestore profile sync skipped for %s: %s", uid, exc)
+
+    _QdrantAuthLinkClient.upsert_user(
+        {
+            "user_id": user.user_id,
+            "email": user.email,
+            "role": user.role,
+            "name": user.name,
+            "provider": provider,
+        }
     )
-    token = _create_access_token(user.user_id, user.email, user.role, user.name)
+
+    return user
+
+
+async def get_current_user(authorization: str | None = Header(default=None)) -> AuthUser:
+    token = _extract_bearer_token(authorization)
+    claims = _verify_firebase_token(token)
+    return _upsert_firestore_profile(claims, None)
+
+
+async def require_admin(current_user: AuthUser = Depends(get_current_user)) -> AuthUser:
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin privileges are required")
+    return current_user
+
+
+@router.post("/sync", response_model=AuthResponse)
+async def sync_session(
+    body: SyncRequest,
+    authorization: str | None = Header(default=None),
+) -> AuthResponse:
+    token = _extract_bearer_token(authorization)
+    claims = _verify_firebase_token(token)
+    user = _upsert_firestore_profile(claims, body)
     return AuthResponse(user=user, access_token=token)
 
 
-@router.post("/signup", response_model=AuthResponse)
-async def signup(body: SignupRequest) -> AuthResponse:
-    client = _supabase_client()
-    email = _normalize_email(body.email)
-
-    existing = await client.get_user_by_email(email)
-    if existing is not None:
-        raise HTTPException(status_code=409, detail="An account with this email already exists")
-
-    user_id = str(uuid.uuid4())
-    try:
-        user_row = await client.create_user(
-            {
-                "user_id": user_id,
-                "email": email,
-                "password_hash": _hash_password(body.password),
-                "name": body.name.strip(),
-                "role": body.role,
-                "provider": "password",
-            }
-        )
-        _QdrantAuthLinkClient.upsert_user(user_row)
-    except Exception as exc:
-        try:
-            await client.delete_user_by_id(user_id)
-        except Exception:
-            pass
-        if isinstance(exc, HTTPException):
-            raise
-        raise HTTPException(status_code=503, detail="Unable to persist the new account") from exc
-
-    return _auth_response_from_row(user_row)
-
-
-@router.post("/login", response_model=AuthResponse)
-async def login(body: LoginRequest) -> AuthResponse:
-    client = _supabase_client()
-    email = _normalize_email(body.email)
-
-    existing = await client.get_user_by_email(email)
-    if existing is None:
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-
-    provider = str(existing.get("provider") or "password")
-    password_hash = existing.get("password_hash")
-
-    if provider == "google" and not password_hash:
-        raise HTTPException(status_code=400, detail="This account uses Google sign-in")
-
-    if not password_hash or not _verify_password(body.password, str(password_hash)):
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-
-    return _auth_response_from_row(existing)
-
-
-@router.post("/google", response_model=AuthResponse)
-async def google_auth(body: GoogleAuthRequest) -> AuthResponse:
-    client = _supabase_client()
-    email = _normalize_email(body.email)
-    existing = await client.get_user_by_email(email)
-
-    if body.mode == "login" and existing is None:
-        raise HTTPException(status_code=404, detail="No account found for this Google user")
-
-    if body.mode == "signup" and existing is not None:
-        raise HTTPException(status_code=409, detail="Account already exists")
-
-    if existing is None:
-        role = "admin" if email == "admin@sentinelai.com" else "reviewer"
-        user_id = str(uuid.uuid4())
-        try:
-            created = await client.create_user(
-                {
-                    "user_id": user_id,
-                    "email": email,
-                    "password_hash": None,
-                    "name": body.name.strip(),
-                    "role": role,
-                    "provider": "google",
-                    "google_sub": body.google_sub,
-                }
-            )
-            _QdrantAuthLinkClient.upsert_user(created)
-        except Exception as exc:
-            try:
-                await client.delete_user_by_id(user_id)
-            except Exception:
-                pass
-            if isinstance(exc, HTTPException):
-                raise
-            raise HTTPException(status_code=503, detail="Unable to persist the new Google account") from exc
-        return _auth_response_from_row(created)
-
-    return _auth_response_from_row(existing)
-
-
 @router.get("/me", response_model=AuthUser)
-async def me(authorization: str | None = Header(default=None)) -> AuthUser:
-    token = _extract_bearer_token(authorization)
-    payload = _decode_access_token(token)
-    return AuthUser(
-        user_id=str(payload["sub"]),
-        email=_normalize_email(str(payload["email"])),
-        role=str(payload.get("role") or "reviewer"),
-        name=str(payload.get("name") or "User"),
-    )
+async def me(current_user: AuthUser = Depends(get_current_user)) -> AuthUser:
+    return current_user
+
+
+@router.post("/signup")
+async def signup_legacy_disabled() -> dict[str, str]:
+    raise HTTPException(status_code=410, detail="Legacy signup disabled. Use Firebase Auth from the frontend")
+
+
+@router.post("/login")
+async def login_legacy_disabled() -> dict[str, str]:
+    raise HTTPException(status_code=410, detail="Legacy login disabled. Use Firebase Auth from the frontend")
+
+
+@router.post("/google")
+async def google_legacy_disabled() -> dict[str, str]:
+    raise HTTPException(status_code=410, detail="Legacy Google auth disabled. Use Firebase Auth from the frontend")

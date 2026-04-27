@@ -27,7 +27,14 @@ export default function ProtectedLayout({ children }: { children: ReactNode }) {
   }
 
   if (!isAuthenticated) {
-    return null;
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <div className="text-center space-y-3">
+          <div className="inline-block h-8 w-8 animate-spin rounded-full border-2 border-accent border-r-transparent" />
+          <p className="text-slate-600">Redirecting to login...</p>
+        </div>
+      </div>
+    );
   }
 
   return <>{children}</>;
