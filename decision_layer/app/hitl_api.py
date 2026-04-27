@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
+
+from app.auth_api import AuthUser, get_current_user
 
 try:
     from decision_layer.services.hitl_monitor import HITLQueueItem, ReviewerProfile
@@ -54,7 +56,11 @@ class AssignmentResponse(BaseModel):
 
 
 @router.post("/queue/items", response_model=QueueItemResponse)
-async def enqueue_hitl_item(body: HITLQueueItemRequest, request: Request) -> QueueItemResponse:
+async def enqueue_hitl_item(
+    body: HITLQueueItemRequest,
+    request: Request,
+    _current_user: AuthUser = Depends(get_current_user),
+) -> QueueItemResponse:
     service = getattr(request.app.state, "hitl_monitor", None)
     if service is None:
         raise HTTPException(status_code=503, detail="HITL monitor is not initialized")
@@ -83,7 +89,11 @@ async def enqueue_hitl_item(body: HITLQueueItemRequest, request: Request) -> Que
 
 
 @router.post("/assignments/next", response_model=AssignmentResponse)
-async def assign_next_hitl_item(body: AssignmentRequest, request: Request) -> AssignmentResponse:
+async def assign_next_hitl_item(
+    body: AssignmentRequest,
+    request: Request,
+    _current_user: AuthUser = Depends(get_current_user),
+) -> AssignmentResponse:
     service = getattr(request.app.state, "hitl_monitor", None)
     if service is None:
         raise HTTPException(status_code=503, detail="HITL monitor is not initialized")
@@ -107,7 +117,10 @@ async def assign_next_hitl_item(body: AssignmentRequest, request: Request) -> As
 
 
 @router.post("/queue/recompute")
-async def recompute_hitl_priorities(request: Request) -> dict[str, int]:
+async def recompute_hitl_priorities(
+    request: Request,
+    _current_user: AuthUser = Depends(get_current_user),
+) -> dict[str, int]:
     service = getattr(request.app.state, "hitl_monitor", None)
     if service is None:
         raise HTTPException(status_code=503, detail="HITL monitor is not initialized")
@@ -120,7 +133,10 @@ async def recompute_hitl_priorities(request: Request) -> dict[str, int]:
 
 
 @router.post("/assignments/reclaim-expired")
-async def reclaim_expired_hitl_assignments(request: Request) -> dict[str, int]:
+async def reclaim_expired_hitl_assignments(
+    request: Request,
+    _current_user: AuthUser = Depends(get_current_user),
+) -> dict[str, int]:
     service = getattr(request.app.state, "hitl_monitor", None)
     if service is None:
         raise HTTPException(status_code=503, detail="HITL monitor is not initialized")
@@ -133,7 +149,10 @@ async def reclaim_expired_hitl_assignments(request: Request) -> dict[str, int]:
 
 
 @router.get("/queue/stats")
-async def hitl_queue_stats(request: Request) -> dict[str, int]:
+async def hitl_queue_stats(
+    request: Request,
+    _current_user: AuthUser = Depends(get_current_user),
+) -> dict[str, int]:
     service = getattr(request.app.state, "hitl_monitor", None)
     if service is None:
         raise HTTPException(status_code=503, detail="HITL monitor is not initialized")

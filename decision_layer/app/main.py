@@ -8,11 +8,36 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from importlib import import_module
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
+
+
+def _bootstrap_env() -> None:
+    current = Path(__file__).resolve()
+    decision_layer_root = current.parents[1]
+    workspace_root = decision_layer_root.parent
+
+    for env_path in (workspace_root / ".env", decision_layer_root / ".env"):
+        if not env_path.exists():
+            continue
+
+        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
+_bootstrap_env()
 
 from app.config import QdrantClientSingleton, load_qdrant_settings
 from app.auth_api import router as auth_router
@@ -66,25 +91,36 @@ def _build_batch_signer() -> LocalPrivateKeySigner | None:
     return LocalPrivateKeySigner(private_key)
 
 
+def _is_truthy(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    skip_dependency_check = _is_truthy(os.getenv("SKIP_STARTUP_DEPENDENCY_CHECK"))
+    if not skip_dependency_check:
+        try:
+            await check_connections()
+        except Exception as exc:
+            logger.critical("Cloud dependency health check failed during startup: %s", exc)
+            raise RuntimeError("Startup aborted: cloud dependencies are unavailable") from exc
+    else:
+        logger.warning("Skipping startup dependency checks due to SKIP_STARTUP_DEPENDENCY_CHECK")
+
     try:
-        await check_connections()
+        settings = load_qdrant_settings()
+        qdrant_client = QdrantClientSingleton.get_client(settings)
+        app.state.registry = RegistryManager(
+            audio_dim=audio_fp.embedding_dim,
+            semantic_dim=semantic_fp.embedding_dim,
+            qdrant_client=qdrant_client,
+            semantic_collection_name=settings.collection_name,
+            hnsw_m=settings.hnsw_m,
+            hnsw_ef_construct=settings.hnsw_ef_construct,
+        )
     except Exception as exc:
-        logger.critical("Cloud dependency health check failed during startup: %s", exc)
-        raise RuntimeError("Startup aborted: cloud dependencies are unavailable") from exc
-
-    settings = load_qdrant_settings()
-    qdrant_client = QdrantClientSingleton.get_client(settings)
-
-    app.state.registry = RegistryManager(
-        audio_dim=audio_fp.embedding_dim,
-        semantic_dim=semantic_fp.embedding_dim,
-        qdrant_client=qdrant_client,
-        semantic_collection_name=settings.collection_name,
-        hnsw_m=settings.hnsw_m,
-        hnsw_ef_construct=settings.hnsw_ef_construct,
-    )
+        logger.warning("Registry initialization skipped: %s", exc)
+        app.state.registry = None
     app.state.calibration_monitor = {
         "preds": [],
         "targets": [],
@@ -101,9 +137,16 @@ async def lifespan(app: FastAPI):
         graph_db = None
     app.state.graph_db = graph_db
 
-    hitl_monitor = HITLMonitorService(graph_db=graph_db)
-    hitl_stop_event = asyncio.Event()
-    hitl_maintenance_task = asyncio.create_task(hitl_monitor.run_maintenance_loop(hitl_stop_event))
+    hitl_monitor = None
+    hitl_stop_event = None
+    hitl_maintenance_task = None
+    try:
+        hitl_monitor = HITLMonitorService(graph_db=graph_db)
+        hitl_stop_event = asyncio.Event()
+        hitl_maintenance_task = asyncio.create_task(hitl_monitor.run_maintenance_loop(hitl_stop_event))
+    except Exception as exc:
+        logger.warning("HITL monitor initialization skipped: %s", exc)
+
     app.state.hitl_monitor = hitl_monitor
     app.state.hitl_stop_event = hitl_stop_event
     app.state.hitl_maintenance_task = hitl_maintenance_task

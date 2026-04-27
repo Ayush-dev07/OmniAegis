@@ -3,7 +3,6 @@
 import { useState } from 'react';
 import { useAuth } from '@/lib/auth-context';
 import { useRouter } from 'next/navigation';
-import Script from 'next/script';
 
 export default function LoginPage() {
   const [mode, setMode] = useState<'login' | 'signup'>('login');
@@ -53,10 +52,7 @@ export default function LoginPage() {
   };
 
   return (
-    <>
-      <Script src="https://accounts.google.com/gsi/client" strategy="afterInteractive" />
-
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+    <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
         <div className="w-full max-w-md">
           {/* Background glow effect */}
           <div className="absolute inset-x-0 top-0 h-72 bg-gradient-to-b from-blue-500/10 via-transparent to-transparent pointer-events-none" />
@@ -226,6 +222,5 @@ export default function LoginPage() {
           </div>
         </div>
       </div>
-    </>
   );
 }

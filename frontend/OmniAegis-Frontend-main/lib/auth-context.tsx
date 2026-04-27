@@ -1,9 +1,19 @@
 'use client';
 
+import React, { createContext, useContext, useEffect, useState, ReactNode } from 'react';
+import { FirebaseError } from 'firebase/app';
+import {
+  GoogleAuthProvider,
+  createUserWithEmailAndPassword,
+  onIdTokenChanged,
+  signInWithEmailAndPassword,
+  signInWithPopup,
+  signOut,
+  updateProfile,
+  User as FirebaseUser,
+} from 'firebase/auth';
 
-
-import React, { createContext, useContext, useState, ReactNode, useEffect } from 'react';
-
+import { firebaseAuth } from '@/lib/firebase';
 
 export type UserRole = 'admin' | 'reviewer';
 
@@ -26,24 +36,59 @@ interface AuthContextType {
   signup: (name: string, email: string, password: string) => Promise<void>;
   loginWithGoogle: () => Promise<void>;
   signupWithGoogle: () => Promise<void>;
-  logout: () => void;
+  logout: () => Promise<void>;
   isAuthenticated: boolean;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-declare global {
-  interface Window {
-    google?: any;
-  }
-}
-
 const SESSION_STORAGE_KEY = 'sentinel-user';
 const SESSION_TOKEN_STORAGE_KEY = 'sentinel-access-token';
-
 const AUTH_API_BASE_URL = '/api/auth';
 
-const ADMIN_EMAILS = new Set(['admin@sentinelai.com']);
+function mapFirebaseAuthError(error: unknown): Error {
+  if (!(error instanceof FirebaseError)) {
+    return error instanceof Error ? error : new Error('Authentication failed. Please try again.');
+  }
+
+  if (error.code === 'auth/configuration-not-found') {
+    return new Error(
+      'Firebase Auth configuration is missing for this project. Enable Authentication and Google provider in Firebase Console, then verify NEXT_PUBLIC_FIREBASE_* keys.',
+    );
+  }
+
+  if (error.code === 'auth/unauthorized-domain') {
+    return new Error('This domain is not authorized in Firebase Auth. Add localhost to Firebase Authentication authorized domains.');
+  }
+
+  if (error.code === 'auth/popup-closed-by-user') {
+    return new Error('Google sign-in popup was closed before completing authentication.');
+  }
+
+  return new Error(error.message || 'Authentication failed. Please try again.');
+}
+
+function normalizeRole(role: unknown): UserRole {
+  return role === 'admin' ? 'admin' : 'reviewer';
+}
+
+function parseAuthResponse(payload: any): AuthSession {
+  const u = payload?.user;
+  const accessToken = String(payload?.access_token || '');
+  if (!u || !u.user_id || !u.email || !u.role || !u.name || !accessToken) {
+    throw new Error('Authentication response is invalid.');
+  }
+
+  return {
+    user: {
+      id: String(u.user_id),
+      email: String(u.email),
+      role: normalizeRole(u.role),
+      name: String(u.name),
+    },
+    accessToken,
+  };
+}
 
 export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [user, setUser] = useState<User | null>(null);
@@ -61,42 +106,27 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     localStorage.removeItem(SESSION_TOKEN_STORAGE_KEY);
   };
 
-  const parseAuthResponse = (payload: any): AuthSession => {
-    const u = payload?.user;
-    const accessToken = String(payload?.access_token || '');
-    if (!u || !u.user_id || !u.email || !u.role || !u.name || !accessToken) {
-      throw new Error('Authentication response is invalid.');
-    }
+  const syncBackendSession = async (
+    firebaseUser: FirebaseUser,
+    provider: string,
+    fallbackName?: string,
+  ): Promise<AuthSession> => {
+    const idToken = await firebaseUser.getIdToken(true);
 
-    return {
-      user: {
-        id: String(u.user_id),
-        email: String(u.email),
-        role: (u.role === 'admin' ? 'admin' : 'reviewer') as UserRole,
-        name: String(u.name),
+    const response = await fetch(`${AUTH_API_BASE_URL}/sync`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${idToken}`,
       },
-      accessToken,
-    };
-  };
-
-  const postAuth = async (path: string, body: Record<string, unknown>): Promise<AuthSession> => {
-    const normalizedPath = path.startsWith('/auth') ? path.slice('/auth'.length) : path;
-
-    let response: Response;
-    try {
-      response = await fetch(`${AUTH_API_BASE_URL}${normalizedPath}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(body),
-      });
-    } catch {
-      throw new Error('Unable to reach the authentication service. Please try again.');
-    }
+      body: JSON.stringify({
+        name: fallbackName ?? firebaseUser.displayName ?? undefined,
+        provider,
+      }),
+    });
 
     if (!response.ok) {
-      let message = 'Authentication failed';
+      let message = 'Authentication sync failed';
       try {
         const payload = await response.json();
         message = String(payload?.detail || payload?.error || message);
@@ -106,80 +136,40 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       throw new Error(message);
     }
 
-    return parseAuthResponse(await response.json());
+    const payload = await response.json();
+    return parseAuthResponse(payload);
   };
 
-  const authenticateWithGoogle = async (mode: 'login' | 'signup') => {
-    const clientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID;
-    if (!clientId) {
-      throw new Error('Google auth is not configured. Set NEXT_PUBLIC_GOOGLE_CLIENT_ID.');
-    }
-
-    if (!window.google?.accounts?.oauth2) {
-      throw new Error('Google auth script is not loaded yet. Please try again.');
-    }
-
-    const tokenResponse = await new Promise<{ access_token: string }>((resolve, reject) => {
-      const tokenClient = window.google.accounts.oauth2.initTokenClient({
-        client_id: clientId,
-        scope: 'openid email profile',
-        prompt: 'select_account',
-        callback: (response: { access_token?: string; error?: string }) => {
-          if (response.error || !response.access_token) {
-            reject(new Error(response.error ?? 'Google authentication failed.'));
-            return;
-          }
-          resolve({ access_token: response.access_token });
-        },
-      });
-
-      tokenClient.requestAccessToken();
-    });
-
-    const profileResponse = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
-      headers: {
-        Authorization: `Bearer ${tokenResponse.access_token}`,
-      },
-    });
-
-    if (!profileResponse.ok) {
-      throw new Error('Unable to fetch Google profile. Please try again.');
-    }
-
-    const profile = (await profileResponse.json()) as { sub?: string; email?: string; name?: string };
-
-    if (!profile.email) {
-      throw new Error('Google account email is unavailable.');
-    }
-
-    const session = await postAuth('/auth/google', {
-      mode,
-      email: profile.email,
-      name: profile.name ?? profile.email.split('@')[0],
-      google_sub: profile.sub,
-      role: ADMIN_EMAILS.has(profile.email) ? 'admin' : 'reviewer',
-    });
-    persistSession(session);
-  };
-
-  // Simulate checking if user is already logged in (check localStorage or session)
   useEffect(() => {
-    const stored = localStorage.getItem(SESSION_STORAGE_KEY);
-    if (stored) {
+    const unsubscribe = onIdTokenChanged(firebaseAuth, async (firebaseUser) => {
+      if (!firebaseUser) {
+        clearSession();
+        setLoading(false);
+        return;
+      }
+
       try {
-        setUser(JSON.parse(stored));
+        const provider = firebaseUser.providerData[0]?.providerId ?? 'password';
+        const session = await syncBackendSession(firebaseUser, provider);
+        persistSession(session);
       } catch {
         clearSession();
+      } finally {
+        setLoading(false);
       }
-    }
-    setLoading(false);
+    });
+
+    return () => unsubscribe();
   }, []);
 
   const login = async (email: string, password: string) => {
     setLoading(true);
     try {
-      const session = await postAuth('/auth/login', { email, password });
+      const credential = await signInWithEmailAndPassword(firebaseAuth, email, password);
+      const session = await syncBackendSession(credential.user, 'password');
       persistSession(session);
+    } catch (error) {
+      throw mapFirebaseAuthError(error);
     } finally {
       setLoading(false);
     }
@@ -188,13 +178,14 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const signup = async (name: string, email: string, password: string) => {
     setLoading(true);
     try {
-      const session = await postAuth('/auth/signup', {
-        name,
-        email,
-        password,
-        role: ADMIN_EMAILS.has(email.toLowerCase()) ? 'admin' : 'reviewer',
-      });
+      const credential = await createUserWithEmailAndPassword(firebaseAuth, email, password);
+      if (name.trim()) {
+        await updateProfile(credential.user, { displayName: name.trim() });
+      }
+      const session = await syncBackendSession(credential.user, 'password', name.trim() || undefined);
       persistSession(session);
+    } catch (error) {
+      throw mapFirebaseAuthError(error);
     } finally {
       setLoading(false);
     }
@@ -203,22 +194,23 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const loginWithGoogle = async () => {
     setLoading(true);
     try {
-      await authenticateWithGoogle('login');
+      const provider = new GoogleAuthProvider();
+      const credential = await signInWithPopup(firebaseAuth, provider);
+      const session = await syncBackendSession(credential.user, 'google');
+      persistSession(session);
+    } catch (error) {
+      throw mapFirebaseAuthError(error);
     } finally {
       setLoading(false);
     }
   };
 
   const signupWithGoogle = async () => {
-    setLoading(true);
-    try {
-      await authenticateWithGoogle('signup');
-    } finally {
-      setLoading(false);
-    }
+    await loginWithGoogle();
   };
 
-  const logout = () => {
+  const logout = async () => {
+    await signOut(firebaseAuth);
     clearSession();
   };
 
