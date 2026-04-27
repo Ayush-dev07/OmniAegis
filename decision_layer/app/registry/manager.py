@@ -109,13 +109,41 @@ class RegistryManager:
 
     @staticmethod
     def _semantic_point_id(asset_id: str) -> int:
-        """Return a deterministic integer point id compatible with local Qdrant.
+        """Return a deterministic integer point id compatible with Qdrant.
 
-        Local Qdrant strictly validates string ids as UUIDs. Using a stable int id
-        avoids UUID requirements while preserving asset identity in payload.
+        Qdrant validates string ids as UUIDs. Using a stable int id avoids UUID
+        requirements while preserving asset identity in payload.
         """
         digest = hashlib.sha1(asset_id.encode("utf-8")).digest()
         return int.from_bytes(digest[:8], byteorder="big", signed=False)
+
+    @staticmethod
+    def _build_query_filter(
+        owner_user_id: str | None = None,
+        modality_filter: str | None = None,
+    ) -> qmodels.Filter | None:
+        conditions: list[qmodels.FieldCondition] = []
+
+        if owner_user_id:
+            conditions.append(
+                qmodels.FieldCondition(
+                    key="user_id",
+                    match=qmodels.MatchValue(value=owner_user_id),
+                )
+            )
+
+        if modality_filter:
+            conditions.append(
+                qmodels.FieldCondition(
+                    key="modality",
+                    match=qmodels.MatchValue(value=modality_filter),
+                )
+            )
+
+        if not conditions:
+            return None
+
+        return qmodels.Filter(must=conditions)
 
     def register_image(self, asset_id: str, hash_bytes: np.ndarray, metadata: dict[str, Any]) -> None:
         if self.qdrant is None:
@@ -218,7 +246,12 @@ class RegistryManager:
             existing = self.metadata_store.get(asset_id, {})
             self.metadata_store[asset_id] = {**existing, **metadata}
 
-    def match_image(self, hash_bytes: np.ndarray, top_k: int = 5) -> list[MatchResult]:
+    def match_image(
+        self,
+        hash_bytes: np.ndarray,
+        top_k: int = 5,
+        owner_user_id: str | None = None,
+    ) -> list[MatchResult]:
         if self.qdrant is None:
             raise RuntimeError("Qdrant client is not initialized")
 
@@ -229,6 +262,7 @@ class RegistryManager:
                 collection_name=self.image_collection_name,
                 query=query.tolist(),
                 limit=top_k,
+                query_filter=self._build_query_filter(owner_user_id=owner_user_id),
                 with_payload=True,
                 with_vectors=False,
             )
@@ -250,7 +284,12 @@ class RegistryManager:
                 )
             return results
 
-    def match_video(self, hash_bytes: np.ndarray, top_k: int = 5) -> list[MatchResult]:
+    def match_video(
+        self,
+        hash_bytes: np.ndarray,
+        top_k: int = 5,
+        owner_user_id: str | None = None,
+    ) -> list[MatchResult]:
         if self.qdrant is None:
             raise RuntimeError("Qdrant client is not initialized")
 
@@ -261,6 +300,7 @@ class RegistryManager:
                 collection_name=self.video_collection_name,
                 query=query.tolist(),
                 limit=top_k,
+                query_filter=self._build_query_filter(owner_user_id=owner_user_id),
                 with_payload=True,
                 with_vectors=False,
             )
@@ -282,7 +322,12 @@ class RegistryManager:
                 )
             return results
 
-    def match_audio(self, embedding: np.ndarray, top_k: int = 5) -> list[MatchResult]:
+    def match_audio(
+        self,
+        embedding: np.ndarray,
+        top_k: int = 5,
+        owner_user_id: str | None = None,
+    ) -> list[MatchResult]:
         if self.qdrant is None:
             raise RuntimeError("Qdrant client is not initialized")
 
@@ -294,6 +339,7 @@ class RegistryManager:
                 collection_name=self.audio_collection_name,
                 query=query[0].tolist(),
                 limit=top_k,
+                query_filter=self._build_query_filter(owner_user_id=owner_user_id),
                 with_payload=True,
                 with_vectors=False,
             )
@@ -320,6 +366,7 @@ class RegistryManager:
         embedding: np.ndarray,
         top_k: int = 5,
         modality_filter: str | None = None,
+        owner_user_id: str | None = None,
     ) -> list[MatchResult]:
         if self.qdrant is None:
             raise RuntimeError("Qdrant client is not initialized")
@@ -328,16 +375,10 @@ class RegistryManager:
             query = np.asarray(embedding, dtype=np.float32).reshape(1, -1)
             query = self._normalize_rows(query)
 
-            query_filter = None
-            if modality_filter:
-                query_filter = qmodels.Filter(
-                    must=[
-                        qmodels.FieldCondition(
-                            key="modality",
-                            match=qmodels.MatchValue(value=modality_filter),
-                        )
-                    ]
-                )
+            query_filter = self._build_query_filter(
+                owner_user_id=owner_user_id,
+                modality_filter=modality_filter,
+            )
 
             if hasattr(self.qdrant, "query_points"):
                 response = self.qdrant.query_points(

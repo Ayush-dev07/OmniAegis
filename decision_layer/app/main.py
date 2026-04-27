@@ -15,6 +15,7 @@ from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import QdrantClientSingleton, load_qdrant_settings
+from app.auth_api import router as auth_router
 from app.batch_api import router as batch_router
 from app.fingerprinters import AudioFingerprinter, ImageFingerprinter, SemanticEmbedder, VideoFingerprinter
 from app.hitl_api import router as hitl_router
@@ -205,6 +206,7 @@ app.add_middleware(
 )
 
 app.add_middleware(PrometheusMiddleware, metrics=GLOBAL_METRICS)
+app.include_router(auth_router)
 app.include_router(batch_router)
 app.include_router(hitl_router)
 app.include_router(xai_router)
@@ -248,6 +250,13 @@ def _compute_ece(preds: list[float], targets: list[int], n_bins: int = 10) -> fl
     return float(compute_ece_fn(preds, targets, n_bins=n_bins))
 
 
+def _normalize_user_id(user_id: str | None, *, required: bool = True) -> str | None:
+    normalized = (user_id or "").strip()
+    if required and not normalized:
+        raise HTTPException(status_code=400, detail="user_id is required")
+    return normalized or None
+
+
 async def _save_upload_to_temp(upload: UploadFile, suffix: str = "") -> str:
     try:
         content = await upload.read()
@@ -283,7 +292,7 @@ def _match_results_to_schema(
     )
 
 
-def _build_image_explanation(content: bytes, top_k: int) -> dict[str, Any]:
+def _build_image_explanation(content: bytes, top_k: int, owner_user_id: str | None = None) -> dict[str, Any]:
     visual, graph_builder, graph_explainer = _xai_components()
     registry = _registry()
 
@@ -302,7 +311,12 @@ def _build_image_explanation(content: bytes, top_k: int) -> dict[str, Any]:
     try:
         semantic = semantic_fp.embed_from_bytes(content)
         phash = image_fp.fingerprint_from_bytes(content)
-        semantic_matches = registry.match_semantic(semantic["embedding"], top_k=top_k, modality_filter="image")
+        semantic_matches = registry.match_semantic(
+            semantic["embedding"],
+            top_k=top_k,
+            modality_filter="image",
+            owner_user_id=owner_user_id,
+        )
         subgraph = graph_builder.build_subgraph(
             query_embedding=semantic["embedding"],
             qdrant_results=semantic_matches,
@@ -324,18 +338,25 @@ async def fingerprint_image(
     register: bool = Form(False),
     asset_id: str | None = Form(None),
     source: str | None = Form(None),
+    user_id: str | None = Form(None),
 ) -> FingerprintResponse:
     try:
         registry = _registry()
         content = await file.read()
         fp = image_fp.fingerprint_from_bytes(content)
+        owner_user_id = _normalize_user_id(user_id, required=register)
 
         assigned_id = asset_id or str(uuid.uuid4())
         if register:
             registry.register_image(
                 asset_id=assigned_id,
                 hash_bytes=fp["hash_bytes"],
-                metadata={"modality": "image", "filename": file.filename, "source": source},
+                metadata={
+                    "modality": "image",
+                    "filename": file.filename,
+                    "source": source,
+                    "user_id": owner_user_id,
+                },
             )
 
             # Stage-2 semantic registration for derivative-work matching.
@@ -343,7 +364,13 @@ async def fingerprint_image(
             registry.register_semantic(
                 asset_id=assigned_id,
                 embedding=semantic["embedding"],
-                metadata={"semantic_embedding_dim": semantic["embedding_dim"]},
+                metadata={
+                    "modality": "image",
+                    "semantic_embedding_dim": semantic["embedding_dim"],
+                    "source": source,
+                    "filename": file.filename,
+                    "user_id": owner_user_id,
+                },
             )
 
         return FingerprintResponse(
@@ -368,11 +395,13 @@ async def fingerprint_semantic_image(
     register: bool = Form(False),
     asset_id: str | None = Form(None),
     source: str | None = Form(None),
+    user_id: str | None = Form(None),
 ) -> dict[str, Any]:
     try:
         registry = _registry()
         content = await file.read()
         semantic = semantic_fp.embed_from_bytes(content)
+        owner_user_id = _normalize_user_id(user_id, required=register)
 
         assigned_id = asset_id or str(uuid.uuid4())
         if register:
@@ -385,6 +414,7 @@ async def fingerprint_semantic_image(
                     "filename": file.filename,
                     "source": source,
                     "semantic_embedding_dim": semantic["embedding_dim"],
+                    "user_id": owner_user_id,
                 },
             )
 
@@ -406,11 +436,13 @@ async def fingerprint_video(
     register: bool = Form(False),
     asset_id: str | None = Form(None),
     source: str | None = Form(None),
+    user_id: str | None = Form(None),
 ) -> FingerprintResponse:
     tmp_path = await _save_upload_to_temp(file, suffix=os.path.splitext(file.filename or "")[1])
     try:
         registry = _registry()
         fp = video_fp.fingerprint(tmp_path)
+        owner_user_id = _normalize_user_id(user_id, required=register)
 
         assigned_id = asset_id or str(uuid.uuid4())
         if register:
@@ -422,6 +454,7 @@ async def fingerprint_video(
                     "filename": file.filename,
                     "source": source,
                     "frames_sampled": fp["frames_sampled"],
+                    "user_id": owner_user_id,
                 },
             )
 
@@ -452,11 +485,13 @@ async def fingerprint_audio(
     register: bool = Form(False),
     asset_id: str | None = Form(None),
     source: str | None = Form(None),
+    user_id: str | None = Form(None),
 ) -> FingerprintResponse:
     tmp_path = await _save_upload_to_temp(file, suffix=os.path.splitext(file.filename or "")[1])
     try:
         registry = _registry()
         fp = audio_fp.fingerprint(tmp_path)
+        owner_user_id = _normalize_user_id(user_id, required=register)
 
         assigned_id = asset_id or str(uuid.uuid4())
         if register:
@@ -468,6 +503,7 @@ async def fingerprint_audio(
                     "filename": file.filename,
                     "source": source,
                     "fingerprint_id": fp["fingerprint_id"],
+                    "user_id": owner_user_id,
                 },
             )
 
@@ -495,21 +531,27 @@ async def match_asset(
     modality: Modality = Form(...),
     file: UploadFile = File(...),
     top_k: int = Form(5),
+    user_id: str = Form(...),
 ) -> MatchResponse:
     if top_k < 1 or top_k > 50:
         raise HTTPException(status_code=400, detail="top_k must be between 1 and 50")
 
     try:
         registry = _registry()
+        owner_user_id = _normalize_user_id(user_id, required=True)
         if modality == Modality.image:
             content = await file.read()
             fp = image_fp.fingerprint_from_bytes(content)
-            results = registry.match_image(fp["hash_bytes"], top_k=top_k)
-            explanation = _build_image_explanation(content=content, top_k=top_k)
+            results = registry.match_image(fp["hash_bytes"], top_k=top_k, owner_user_id=owner_user_id)
+            explanation = _build_image_explanation(content=content, top_k=top_k, owner_user_id=owner_user_id)
             return _match_results_to_schema(
                 modality=modality,
                 results=results,
-                query_summary={"hash_hex": fp["hash_hex"], "hash_size_bits": fp["hash_size_bits"]},
+                query_summary={
+                    "hash_hex": fp["hash_hex"],
+                    "hash_size_bits": fp["hash_size_bits"],
+                    "user_id": owner_user_id,
+                },
                 explanation=explanation,
             )
 
@@ -519,25 +561,31 @@ async def match_asset(
         try:
             if modality == Modality.video:
                 fp = video_fp.fingerprint(tmp_path)
-                results = registry.match_video(fp["aggregate_hash_bytes"], top_k=top_k)
+                results = registry.match_video(
+                    fp["aggregate_hash_bytes"],
+                    top_k=top_k,
+                    owner_user_id=owner_user_id,
+                )
                 return _match_results_to_schema(
                     modality=modality,
                     results=results,
                     query_summary={
                         "frames_sampled": fp["frames_sampled"],
                         "aggregate_hash_hex": fp["aggregate_hash_hex"],
+                        "user_id": owner_user_id,
                     },
                 )
 
             if modality == Modality.audio:
                 fp = audio_fp.fingerprint(tmp_path)
-                results = registry.match_audio(fp["embedding"], top_k=top_k)
+                results = registry.match_audio(fp["embedding"], top_k=top_k, owner_user_id=owner_user_id)
                 return _match_results_to_schema(
                     modality=modality,
                     results=results,
                     query_summary={
                         "fingerprint_id": fp["fingerprint_id"],
                         "embedding_dim": fp["embedding_dim"],
+                        "user_id": owner_user_id,
                     },
                 )
 
@@ -561,6 +609,7 @@ async def verify_image_slow_gate(
     hamming_inconclusive_threshold: int = Form(20),
     semantic_alert_threshold: float = Form(0.85),
     modality_filter: str | None = Form(None),
+    user_id: str = Form(...),
 ) -> dict[str, Any]:
     """Two-stage verification pattern:
 
@@ -574,9 +623,14 @@ async def verify_image_slow_gate(
 
     try:
         registry = _registry()
+        owner_user_id = _normalize_user_id(user_id, required=True)
         content = await file.read()
         image_hash = image_fp.fingerprint_from_bytes(content)
-        fast_matches = registry.match_image(image_hash["hash_bytes"], top_k=top_k)
+        fast_matches = registry.match_image(
+            image_hash["hash_bytes"],
+            top_k=top_k,
+            owner_user_id=owner_user_id,
+        )
 
         best_hamming = fast_matches[0].distance_or_similarity if fast_matches else None
         should_trigger_semantic = best_hamming is None or best_hamming > hamming_inconclusive_threshold
@@ -594,6 +648,7 @@ async def verify_image_slow_gate(
                 semantic["embedding"],
                 top_k=top_k,
                 modality_filter=modality_filter,
+                owner_user_id=owner_user_id,
             )
 
             slow_gate["matches"] = [
@@ -611,6 +666,7 @@ async def verify_image_slow_gate(
 
         return {
             "stage_1": {
+                "user_id": owner_user_id,
                 "hash_hex": image_hash["hash_hex"],
                 "hamming_inconclusive_threshold": hamming_inconclusive_threshold,
                 "best_hamming_distance": best_hamming,
