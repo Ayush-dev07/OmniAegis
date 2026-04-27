@@ -1,16 +1,26 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import AnyHttpUrl, AnyUrl, Field, PostgresDsn, RedisDsn, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+_CURRENT_DIR = Path(__file__).resolve().parent
+_DECISION_LAYER_ROOT = _CURRENT_DIR.parent
+_WORKSPACE_ROOT = _DECISION_LAYER_ROOT.parent
 
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(
+            str(_WORKSPACE_ROOT / ".env"),
+            str(_DECISION_LAYER_ROOT / ".env"),
+            ".env",
+        ),
         env_file_encoding="utf-8",
         case_sensitive=True,
         extra="ignore",
