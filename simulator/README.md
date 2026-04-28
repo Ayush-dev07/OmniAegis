@@ -30,6 +30,13 @@ Set Redis URL if needed:
 export SIM_REDIS_URL="redis://127.0.0.1:6379/0"
 ```
 
+If `.env` exists at repo root, the simulator will auto-load it and resolve Redis in this order:
+1. `--redis-url`
+2. `SIM_REDIS_URL`
+3. `REDIS_URL` (unless it points to localhost and Upstash credentials are present)
+4. derived Upstash Redis TLS URL from `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN`
+5. `redis://127.0.0.1:6379/0`
+
 ## Run
 
 One simulation round:
