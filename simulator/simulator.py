@@ -8,12 +8,15 @@ import os
 import random
 import signal
 import string
+from pathlib import Path
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from redis.asyncio import Redis
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 
 DECISION_STREAM_KEY = "sentinel:decision:stream"
@@ -45,6 +48,66 @@ def random_url(modality: str, user_id: str) -> str:
     ext = {"image": "png", "video": "mp4", "audio": "wav", "text": "txt"}[modality]
     slug = "".join(random.choices(string.ascii_lowercase + string.digits, k=12))
     return f"https://synthetic.omniaegis.local/{user_id}/{modality}/{slug}.{ext}"
+
+
+def _load_env_file() -> None:
+    """Best-effort .env loader for local runs without python-dotenv."""
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    if not env_path.exists():
+        return
+
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, raw_value = stripped.split("=", 1)
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        value = raw_value.strip()
+        if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+            value = value[1:-1]
+        os.environ[key] = value
+
+
+def _build_upstash_redis_url() -> str | None:
+    """Construct a Redis TLS URL from Upstash REST credentials when available."""
+    rest_url = (os.getenv("UPSTASH_REDIS_REST_URL") or "").strip()
+    token = (os.getenv("UPSTASH_REDIS_REST_TOKEN") or "").strip()
+    if not rest_url or not token:
+        return None
+
+    parsed = urlparse(rest_url)
+    host = parsed.netloc
+    if not host:
+        return None
+    return f"rediss://default:{token}@{host}:6379"
+
+
+def _resolve_redis_url(cli_redis_url: str | None) -> str:
+    _load_env_file()
+
+    if cli_redis_url:
+        return cli_redis_url
+
+    sim_redis_url = (os.getenv("SIM_REDIS_URL") or "").strip()
+    if sim_redis_url:
+        return sim_redis_url
+
+    redis_url = (os.getenv("REDIS_URL") or "").strip()
+    upstash_redis_url = _build_upstash_redis_url()
+
+    if redis_url:
+        parsed = urlparse(redis_url)
+        host = (parsed.hostname or "").lower()
+        if host in {"localhost", "127.0.0.1", "::1"} and upstash_redis_url:
+            return upstash_redis_url
+        return redis_url
+
+    if upstash_redis_url:
+        return upstash_redis_url
+
+    return "redis://127.0.0.1:6379/0"
 
 
 def make_analysis_payload(user: SimUser, idx: int) -> dict[str, Any]:
@@ -163,7 +226,7 @@ async def simulate_user(
 
 
 async def run_simulation(args: argparse.Namespace) -> None:
-    redis_url = args.redis_url or os.getenv("SIM_REDIS_URL") or os.getenv("REDIS_URL") or "redis://127.0.0.1:6379/0"
+    redis_url = _resolve_redis_url(args.redis_url)
     redis_client = Redis.from_url(redis_url, decode_responses=True)
     users = build_users(args.users)
 
@@ -177,6 +240,14 @@ async def run_simulation(args: argparse.Namespace) -> None:
         loop.add_signal_handler(sig, _stop_handler)
 
     try:
+        try:
+            await redis_client.ping()
+        except RedisConnectionError as exc:
+            raise RuntimeError(
+                "Redis connection failed. Set --redis-url or SIM_REDIS_URL to a reachable Redis instance. "
+                "Tip: if .env includes UPSTASH_REDIS_REST_URL/TOKEN, the simulator can auto-derive a rediss URL."
+            ) from exc
+
         round_idx = 0
         while not stop_event.is_set():
             round_idx += 1
