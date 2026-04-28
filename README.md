@@ -27,7 +27,7 @@
 - [Getting Started](#getting-started)
   - [Prerequisites](#prerequisites)
   - [Local Development (Docker Compose)](#local-development-docker-compose)
-  - [Kubernetes Deployment](#kubernetes-deployment)
+  - [Google cloud Deployment](#kubernetes-deployment)
 - [API Reference](#api-reference)
 - [Configuration](#configuration)
 - [Testing](#testing)
