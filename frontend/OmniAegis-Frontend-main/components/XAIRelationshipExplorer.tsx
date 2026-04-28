@@ -1,8 +1,10 @@
 'use client';
 
 import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { useRouter } from 'next/navigation';
 
 import { Button, Input } from '@/components/ui';
+import { useAuth } from '@/lib/auth-context';
 
 interface GraphNode {
   id: string;
@@ -40,6 +42,8 @@ export default function XAIRelationshipExplorer() {
   const [graph, setGraph] = useState<GraphResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const { user, accessToken, loading: authLoading } = useAuth();
+  const router = useRouter();
 
   const selectedNode = useMemo(() => graph?.nodes.find((node) => node.is_query) ?? graph?.nodes[0] ?? null, [graph]);
 
@@ -50,7 +54,7 @@ export default function XAIRelationshipExplorer() {
       return;
     }
 
-    const token = localStorage.getItem('sentinel-access-token') || '';
+    const token = accessToken || localStorage.getItem('sentinel-access-token') || '';
     setLoading(true);
     setError('');
 
@@ -77,6 +81,11 @@ export default function XAIRelationshipExplorer() {
   };
 
   useEffect(() => {
+    if (!authLoading && !user) {
+      setError('Please sign in to view the XAI graph.');
+      return;
+    }
+
     const cachedAssetId = localStorage.getItem(LAST_ASSET_KEY) || '';
     const cachedGraph = localStorage.getItem(LAST_GRAPH_KEY);
 
@@ -92,6 +101,26 @@ export default function XAIRelationshipExplorer() {
       }
     }
   }, []);
+
+  if (authLoading) {
+    return <div className="rounded-xl bg-surface-secondary p-5 text-sm text-text-secondary">Loading authentication…</div>;
+  }
+
+  if (!user) {
+    return (
+      <div className="rounded-xl bg-surface-secondary p-6 text-sm text-text-secondary">
+        <p className="text-text-primary font-semibold">Authentication required</p>
+        <p className="mt-2">Sign in to load the relationship graph.</p>
+        <button
+          type="button"
+          onClick={() => router.push('/login')}
+          className="mt-4 rounded-xl bg-accent px-4 py-2 font-semibold text-text-primary"
+        >
+          Go to login
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">

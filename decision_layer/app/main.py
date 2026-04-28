@@ -12,7 +12,7 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -41,7 +41,7 @@ def _bootstrap_env() -> None:
 _bootstrap_env()
 
 from app.config import QdrantClientSingleton, load_qdrant_settings
-from app.auth_api import router as auth_router
+from app.auth_api import AuthUser, get_current_user, router as auth_router
 from app.batch_api import router as batch_router
 from app.fingerprinters import AudioFingerprinter, ImageFingerprinter, VideoFingerprinter
 from app.fingerprinters.image_features import ImageFeatureExtractor
@@ -174,7 +174,8 @@ async def lifespan(app: FastAPI):
     try:
         graph_db = GraphDBService.from_env()
         graph_db.run_migrations()
-    except Exception:
+    except Exception as exc:
+        logger.warning("Graph DB initialization skipped: %s", exc)
         graph_db = None
     app.state.graph_db = graph_db
 
@@ -350,6 +351,12 @@ def _normalize_user_id(user_id: str | None, *, required: bool = True) -> str | N
     if required and not normalized:
         raise HTTPException(status_code=400, detail="user_id is required")
     return normalized or None
+
+
+async def _optional_current_user(authorization: str | None = Header(default=None)) -> AuthUser | None:
+    if not authorization:
+        return None
+    return await get_current_user(authorization)
 
 
 async def _save_upload_to_temp(upload: UploadFile, suffix: str = "") -> str:
@@ -552,19 +559,21 @@ async def fingerprint_image(
 async def register_onboarding_content(
     file: UploadFile = File(...),
     license: UploadFile = File(...),
-    user_id: str = Form(...),
+    user_id: str | None = Form(None),
     asset_id: str | None = Form(None),
     source: str | None = Form(None),
     title: str | None = Form(None),
     creator_id: str | None = Form(None),
     licensee_id: str | None = Form(None),
     top_k: int = Form(5),
+    current_user: AuthUser | None = Depends(_optional_current_user),
 ) -> dict[str, Any]:
     if top_k < 1 or top_k > 25:
         raise HTTPException(status_code=400, detail="top_k must be between 1 and 25")
 
     registry = _registry()
-    owner_user_id = _normalize_user_id(user_id, required=True)
+    resolved_user_id = user_id or (current_user.user_id if current_user is not None else None)
+    owner_user_id = _normalize_user_id(resolved_user_id, required=True)
     content = await _read_upload_bytes(file, "content file")
     _license_content = await _read_upload_bytes(license, "license file")
     assigned_id = asset_id or str(uuid.uuid4())

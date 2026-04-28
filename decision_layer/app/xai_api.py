@@ -9,10 +9,12 @@ from pydantic import BaseModel, Field
 from app.auth_api import AuthUser, get_current_user
 
 try:
+    from decision_layer.services.graph_db import GraphDBService
     from decision_layer.services.xai_drift import KSDriftDetector
     from decision_layer.services.xai_storage import ExplainabilityStorage
     from decision_layer.services.xai_umap import UMAPProjector
 except ModuleNotFoundError:  # pragma: no cover
+    from services.graph_db import GraphDBService
     from services.xai_drift import KSDriftDetector
     from services.xai_storage import ExplainabilityStorage
     from services.xai_umap import UMAPProjector
@@ -211,7 +213,12 @@ async def get_asset_relationship_graph(
 ) -> dict[str, Any]:
     graph_db = getattr(request.app.state, "graph_db", None)
     if graph_db is None:
-        raise HTTPException(status_code=503, detail="Graph database is not initialized")
+        try:
+            graph_db = GraphDBService.from_env()
+            graph_db.run_migrations()
+            request.app.state.graph_db = graph_db
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"Graph database is not initialized: {exc}") from exc
 
     normalized_asset_id = asset_id.strip()
     if not normalized_asset_id:
