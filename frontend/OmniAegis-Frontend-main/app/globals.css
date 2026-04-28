@@ -2,47 +2,194 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ====== DESIGN TOKENS: OmniAegis Unified Design System ====== */
+
 :root {
-  color-scheme: light;
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  background-color: #f8fafc;
-  color: #0f172a;
+  /* ====== BASE SURFACES (Dark-mode primary) ====== */
+  --color-bg-primary: #0D0E12;
+  --color-bg-secondary: #13151C;
+  --color-bg-tertiary: #1A1D27;
+  --color-bg-elevated: #21253A;
+
+  /* ====== BORDERS ====== */
+  --color-border-default: rgba(255, 255, 255, 0.06);
+  --color-border-strong: rgba(255, 255, 255, 0.09);
+  --color-border-subtle: rgba(255, 255, 255, 0.03);
+  --color-border-standard: rgba(255, 255, 255, 0.05);
+
+  /* ====== BRAND ACCENT — Electric Indigo ====== */
+  --color-accent: #6C63FF;
+  --color-accent-hover: #7B74FF;
+  --color-accent-muted: #6C63FF22;
+  --color-accent-glow: #6C63FF44;
+
+  /* ====== SEMANTIC STATUS ====== */
+  --color-success: #22D3A0;
+  --color-success-bg: #22D3A015;
+  --color-warning: #F5A623;
+  --color-warning-bg: #F5A62315;
+  --color-danger: #FF4D6A;
+  --color-danger-bg: #FF4D6A15;
+  --color-neutral: #8B93B0;
+  --color-neutral-bg: #8B93B015;
+
+  /* ====== TEXT ====== */
+  --color-text-primary: #E8EAF6;
+  --color-text-secondary: #8B93B0;
+  --color-text-tertiary: #62666D;
+  --color-text-disabled: #4A5070;
+  --color-text-inverse: #0D0E12;
+
+  /* ====== HEATMAP OVERLAY (XAI-specific) ====== */
+  --color-heatmap-high: rgba(255, 77, 106, 0.75);
+  --color-heatmap-mid: rgba(245, 166, 35, 0.55);
+  --color-heatmap-low: rgba(34, 211, 160, 0.30);
+
+  /* ====== ELEVATION & SHADOWS ====== */
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.6);
+  --shadow-glow: 0 0 0 2px var(--color-accent-glow);
+  --shadow-inset: rgba(0, 0, 0, 0.2) 0px 0px 12px inset;
+
+  /* ====== TYPOGRAPHY ====== */
+  --font-sans: 'Inter', 'Geist', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Consolas', 'Menlo', monospace;
+
+  /* ====== SPACING SCALE ====== */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+  --space-20: 80px;
+
+  /* ====== ANIMATION DURATIONS & EASING ====== */
+  --duration-fast: 100ms;
+  --duration-normal: 200ms;
+  --duration-slow: 350ms;
+  --duration-crawl: 600ms;
+  --ease-out: cubic-bezier(0, 0, 0.2, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  color-scheme: dark;
+  font-family: var(--font-sans);
+  background-color: var(--color-bg-primary);
+  color: var(--color-text-primary);
+}
+
+/* ====== LIGHT THEME ====== */
+[data-theme="light"] {
+  --color-bg-primary: #F5F6FA;
+  --color-bg-secondary: #FFFFFF;
+  --color-bg-tertiary: #ECEEF5;
+  --color-bg-elevated: #FFFFFF;
+  --color-border-default: #DDE0ED;
+  --color-border-strong: #B8BCCC;
+  --color-border-subtle: rgba(0, 0, 0, 0.05);
+  --color-border-standard: rgba(0, 0, 0, 0.08);
+  --color-text-primary: #12152A;
+  --color-text-secondary: #5A6080;
+  --color-text-tertiary: #8A8F98;
+  --color-text-disabled: #A0A8C0;
+}
+
+/* ====== HIGH-CONTRAST MODE ====== */
+[data-theme="high-contrast"] {
+  --color-bg-primary: #000000;
+  --color-bg-secondary: #0A0A0A;
+  --color-accent: #A09AFF;
+  --color-border-default: #FFFFFF44;
+  --color-text-primary: #FFFFFF;
+  --color-text-secondary: #CCCCCC;
 }
 
 html {
   scroll-behavior: smooth;
+  font-feature-settings: "cv01", "ss03";
 }
 
 body {
   min-height: 100vh;
-  background: #f8fafc;
-  color: #0f172a;
-}
-
-body::before {
-  content: '';
-  position: fixed;
-  inset: 0;
-  background-image: linear-gradient(90deg, rgba(226,232,240,0.12) 1px, transparent 1px), linear-gradient(180deg, rgba(226,232,240,0.12) 1px, transparent 1px);
-  background-size: 56px 56px;
-  pointer-events: none;
-  opacity: 0.35;
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 ::selection {
-  background: rgba(59,130,246,0.18);
-  color: #0f172a;
+  background: var(--color-accent-glow);
+  color: var(--color-text-primary);
 }
 
-button, input, textarea, select {
+::placeholder {
+  color: var(--color-text-tertiary);
+}
+
+button,
+input,
+textarea,
+select {
   font: inherit;
+  font-feature-settings: "cv01", "ss03";
 }
 
-#root, body, html {
+button {
+  cursor: pointer;
+}
+
+a {
+  color: var(--color-accent);
+  text-decoration: none;
+  transition: color var(--duration-fast) var(--ease-out);
+}
+
+a:hover {
+  color: var(--color-accent-hover);
+}
+
+a:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* Accessibility: Reduce motion */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Global focus styles */
+*:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* Remove default focus outline for mouse users */
+*:focus:not(:focus-visible) {
+  outline: none;
+}
+
+#root,
+body,
+html {
   margin: 0;
   padding: 0;
 }
 
 .prose {
-  color: #0f172a;
+  color: var(--color-text-primary);
 }

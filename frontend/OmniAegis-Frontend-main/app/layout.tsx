@@ -3,21 +3,19 @@ import './globals.css';
 import { AuthProvider } from '@/lib/auth-context';
 
 export const metadata: Metadata = {
-  title: 'OmniAegis Sentinel',
-  description: 'Brand protection and IP monitoring dashboard',
+  title: 'OmniAegis - ML Audit & Explainability Platform',
+  description: 'Enterprise ML auditing, explainability, and policy compliance platform',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
-      <body className="min-h-screen bg-slate-50 text-slate-900">
+    <html lang="en" data-theme="dark">
+      <head>
+        <meta name="theme-color" content="#0D0E12" />
+      </head>
+      <body className="min-h-screen bg-surface-primary text-text-primary">
         <AuthProvider>
-          <div className="relative isolate overflow-hidden">
-            <div className="pointer-events-none absolute inset-x-0 top-0 h-72 bg-top-glow opacity-70" />
-            <div className="relative mx-auto max-w-screen-2xl px-4 py-6 sm:px-6 lg:px-8">
-              {children}
-            </div>
-          </div>
+          {children}
         </AuthProvider>
       </body>
     </html>

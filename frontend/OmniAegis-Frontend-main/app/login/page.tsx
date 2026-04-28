@@ -52,10 +52,10 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+    <div className="relative min-h-screen bg-surface-primary flex items-center justify-center p-4">
         <div className="w-full max-w-md">
           {/* Background glow effect */}
-          <div className="absolute inset-x-0 top-0 h-72 bg-gradient-to-b from-blue-500/10 via-transparent to-transparent pointer-events-none" />
+          <div className="absolute inset-x-0 top-0 h-72 bg-gradient-to-b from-accent/15 via-transparent to-transparent pointer-events-none" />
 
           <div className="relative space-y-8">
             {/* Header */}
@@ -64,14 +64,14 @@ export default function LoginPage() {
                 <span className="text-xl font-bold text-accent">◆</span>
               </div>
               <div className="space-y-2">
-                <h1 className="text-3xl font-bold tracking-tight text-slate-950">SentinelAgent</h1>
-                <p className="text-sm text-slate-600">Brand Protection & IP Monitoring Command Center</p>
+                <h1 className="text-3xl font-bold tracking-tight text-text-primary">SentinelAgent</h1>
+                <p className="text-sm text-text-secondary">Brand Protection & IP Monitoring Command Center</p>
               </div>
             </div>
 
             {/* Auth Card */}
-            <div className="rounded-[2rem] border border-slate-200/80 bg-white/95 shadow-soft backdrop-blur-xl p-8 space-y-6">
-              <div className="grid grid-cols-2 rounded-2xl border border-slate-200 bg-slate-50 p-1">
+            <div className="rounded-[2rem] border border-border-default bg-surface-secondary shadow-md p-8 space-y-6">
+              <div className="grid grid-cols-2 rounded-2xl bg-surface-tertiary p-1">
                 <button
                   type="button"
                   onClick={() => {
@@ -79,7 +79,7 @@ export default function LoginPage() {
                     setError('');
                   }}
                   className={`rounded-xl px-4 py-2 text-sm font-semibold transition ${
-                    mode === 'login' ? 'bg-white text-slate-900 shadow' : 'text-slate-500 hover:text-slate-700'
+                    mode === 'login' ? 'bg-surface-elevated text-text-primary shadow' : 'text-text-secondary hover:text-text-primary'
                   }`}
                 >
                   Login
@@ -91,7 +91,7 @@ export default function LoginPage() {
                     setError('');
                   }}
                   className={`rounded-xl px-4 py-2 text-sm font-semibold transition ${
-                    mode === 'signup' ? 'bg-white text-slate-900 shadow' : 'text-slate-500 hover:text-slate-700'
+                    mode === 'signup' ? 'bg-surface-elevated text-text-primary shadow' : 'text-text-secondary hover:text-text-primary'
                   }`}
                 >
                   Sign up
@@ -102,7 +102,7 @@ export default function LoginPage() {
                 {/* Name Field */}
                 {mode === 'signup' && (
                   <div className="space-y-2">
-                    <label htmlFor="name" className="text-sm font-semibold text-slate-900">
+                    <label htmlFor="name" className="text-sm font-semibold text-text-primary">
                       Full Name
                     </label>
                     <input
@@ -111,7 +111,7 @@ export default function LoginPage() {
                       value={name}
                       onChange={(e) => setName(e.target.value)}
                       placeholder="Jane Doe"
-                      className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent transition"
+                      className="w-full rounded-2xl border border-border-default bg-surface-primary px-4 py-3 text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent transition"
                       required
                     />
                   </div>
@@ -119,7 +119,7 @@ export default function LoginPage() {
 
                 {/* Email Field */}
                 <div className="space-y-2">
-                  <label htmlFor="email" className="text-sm font-semibold text-slate-900">
+                  <label htmlFor="email" className="text-sm font-semibold text-text-primary">
                     {mode === 'login' ? 'Email or Username' : 'Email'}
                   </label>
                   <input
@@ -128,14 +128,14 @@ export default function LoginPage() {
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                     placeholder={mode === 'login' ? 'you@example.com or admin' : 'you@example.com'}
-                    className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent transition"
+                    className="w-full rounded-2xl border border-border-default bg-surface-primary px-4 py-3 text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent transition"
                     required
                   />
                 </div>
 
                 {/* Password Field */}
                 <div className="space-y-2">
-                  <label htmlFor="password" className="text-sm font-semibold text-slate-900">
+                  <label htmlFor="password" className="text-sm font-semibold text-text-primary">
                     Password
                   </label>
                   <input
@@ -144,14 +144,14 @@ export default function LoginPage() {
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     placeholder="••••••••"
-                    className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent transition"
+                    className="w-full rounded-2xl border border-border-default bg-surface-primary px-4 py-3 text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent transition"
                     required
                   />
                 </div>
 
                 {/* Error Message */}
                 {error && (
-                  <div className="rounded-2xl bg-red-50 border border-red-200 p-3 text-sm text-red-700">
+                  <div className="rounded-2xl bg-danger-bg border border-danger/30 p-3 text-sm text-danger">
                     {error}
                   </div>
                 )}
@@ -160,16 +160,16 @@ export default function LoginPage() {
                 <input
                   type="submit"
                   disabled={isLoading}
-                  className="w-full rounded-2xl bg-accent hover:bg-accent/90 disabled:bg-slate-300 text-white font-semibold py-3 transition shadow-lg shadow-accent/20 cursor-pointer"
+                  className="w-full rounded-2xl bg-accent hover:bg-accent/90 disabled:bg-surface-tertiary text-white font-semibold py-3 transition shadow-lg shadow-accent/20 cursor-pointer"
                   value={isLoading ? 'Processing...' : mode === 'login' ? 'Sign in' : 'Create account'}
                 />
 
                 <div className="relative py-1">
                   <div className="absolute inset-0 flex items-center">
-                    <div className="w-full border-t border-slate-200" />
+                    <div className="w-full border-t border-border-default" />
                   </div>
                   <div className="relative flex justify-center">
-                    <span className="bg-white px-3 text-xs uppercase tracking-[0.2em] text-slate-400">or</span>
+                    <span className="bg-surface-secondary px-3 text-xs uppercase tracking-[0.2em] text-text-secondary">or</span>
                   </div>
                 </div>
 
@@ -177,7 +177,7 @@ export default function LoginPage() {
                   type="button"
                   onClick={handleGoogleAuth}
                   disabled={isLoading}
-                  className="w-full rounded-2xl border border-slate-200 bg-white hover:bg-slate-50 disabled:bg-slate-100 text-slate-700 font-semibold py-3 transition flex items-center justify-center gap-3"
+                  className="w-full rounded-2xl border border-border-default bg-surface-primary hover:bg-surface-tertiary disabled:bg-surface-tertiary text-text-primary font-semibold py-3 transition flex items-center justify-center gap-3"
                 >
                   <svg className="h-5 w-5" viewBox="0 0 24 24" aria-hidden="true">
                     <path
@@ -191,17 +191,17 @@ export default function LoginPage() {
 
               {/* Demo Credentials */}
               {mode === 'login' && (
-                <div className="border-t border-slate-200 pt-6 space-y-3">
-                  <p className="text-xs uppercase tracking-[0.28em] text-slate-400">Demo Credentials</p>
+                <div className="border-t border-border-default pt-6 space-y-3">
+                  <p className="text-xs uppercase tracking-[0.28em] text-text-tertiary">Demo Credentials</p>
                   <div className="space-y-2 text-sm">
-                    <div className="rounded-2xl bg-slate-50 p-3">
-                      <p className="font-mono text-slate-600">
-                        <span className="text-slate-400">Admin:</span> admin@sentinelai.com / admin123 (or admin / password)
+                    <div className="rounded-2xl bg-surface-primary p-3">
+                      <p className="font-mono text-text-secondary">
+                        <span className="text-text-tertiary">Admin:</span> admin@sentinelai.com / admin123 (or admin / password)
                       </p>
                     </div>
-                    <div className="rounded-2xl bg-slate-50 p-3">
-                      <p className="font-mono text-slate-600">
-                        <span className="text-slate-400">Reviewer:</span> reviewer@sentinelai.com / reviewer123 (or reviewer / password)
+                    <div className="rounded-2xl bg-surface-primary p-3">
+                      <p className="font-mono text-text-secondary">
+                        <span className="text-text-tertiary">Reviewer:</span> reviewer@sentinelai.com / reviewer123 (or reviewer / password)
                       </p>
                     </div>
                   </div>
@@ -209,14 +209,14 @@ export default function LoginPage() {
               )}
 
               {mode === 'signup' && (
-                <p className="text-xs text-slate-500">
+                <p className="text-xs text-text-tertiary">
                   Sign up creates a reviewer account by default. Admin role remains restricted.
                 </p>
               )}
             </div>
 
             {/* Footer */}
-            <p className="text-center text-xs text-slate-500">
+            <p className="text-center text-xs text-text-tertiary">
               Secure authentication with role-based access control
             </p>
           </div>

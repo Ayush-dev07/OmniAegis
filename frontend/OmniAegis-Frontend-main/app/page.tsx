@@ -1,138 +1,303 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
-import DashboardShell from '@/components/DashboardShell';
-import OverviewMetrics from '@/components/OverviewMetrics';
-import OverviewCards from '@/components/OverviewCards';
-import LiveActivityFeed from '@/components/LiveActivityFeed';
-import ThreatQueue from '@/components/ThreatQueue';
-import HITLApprovalSummary from '@/components/HITLApprovalSummary';
-import ContentRegistrationModal from '@/components/ContentRegistrationModal';
-import SaliencyDriftViewer, { UMAPPoint } from '@/src/components/phase2/xai/SaliencyDriftViewer';
-import FLHealthMonitor, { EdgeNode } from '@/src/components/phase2/fl/FLHealthMonitor';
-import HITLDecisionQueue from '@/src/components/phase2/hitl/HITLDecisionQueue';
-import { useAuth } from '@/lib/auth-context';
+import React, { useState } from 'react';
+import { MainLayout } from '@/components/layout';
+import {
+  ConfidenceBadge,
+  StatusChip,
+  Button,
+  DataTable,
+  Modal,
+} from '@/components/ui';
 
-export default function ExecutiveCommandCenter() {
-  const { user } = useAuth();
-  const [isContentModalOpen, setIsContentModalOpen] = useState(false);
-  const xaiPoints = useMemo<UMAPPoint[]>(
-    () => [
-      { id: 'asset-1', x: 0.12, y: 0.86, label: 'Potential logo spoofing pattern detected.', score: 0.82 },
-      { id: 'asset-2', x: 0.27, y: 0.74, label: 'Near-duplicate frame cluster.', score: 0.63 },
-      { id: 'asset-3', x: 0.71, y: 0.32, label: 'Low-risk drift segment.', score: 0.34 },
-      { id: 'asset-4', x: 0.88, y: 0.21, label: 'Cross-tenant semantic anomaly.', score: 0.76 },
-      { id: 'asset-5', x: 0.49, y: 0.57, label: 'Watermark mismatch context.', score: 0.55 },
-    ],
-    []
-  );
+interface AuditRow {
+  id: string;
+  assetId: string;
+  decision: 'approved' | 'rejected' | 'pending';
+  confidence: number;
+  policy: string;
+  timestamp: string;
+}
 
-  const flNodes = useMemo<EdgeNode[]>(
-    () => [
-      { id: 'edge-us-east-01', label: 'US-East #01', status: 'training' },
-      { id: 'edge-eu-west-02', label: 'EU-West #02', status: 'syncing' },
-      { id: 'edge-ap-south-03', label: 'AP-South #03', status: 'idle' },
-      { id: 'edge-us-west-04', label: 'US-West #04', status: 'training' },
-      { id: 'edge-eu-central-05', label: 'EU-Central #05', status: 'syncing' },
-      { id: 'edge-test-06', label: 'Test Node #06', status: 'offline' },
-    ],
-    []
-  );
+const DEMO_AUDITS: AuditRow[] = [
+  {
+    id: 'AUDIT-001',
+    assetId: 'img_47f3a2',
+    decision: 'approved',
+    confidence: 0.87,
+    policy: 'ContentV3',
+    timestamp: '2024-04-28 09:42',
+  },
+  {
+    id: 'AUDIT-002',
+    assetId: 'img_56f4b3',
+    decision: 'rejected',
+    confidence: 0.15,
+    policy: 'ContentV3',
+    timestamp: '2024-04-28 08:20',
+  },
+  {
+    id: 'AUDIT-003',
+    assetId: 'img_65f5c4',
+    decision: 'pending',
+    confidence: 0.52,
+    policy: 'PolicyV2',
+    timestamp: '2024-04-28 07:15',
+  },
+];
 
-  useEffect(() => {
-    if (!user) {
-      return;
-    }
-
-    const promptKey = `content-registration-prompt:${user.id}`;
-    if (!sessionStorage.getItem(promptKey)) {
-      setIsContentModalOpen(true);
-      sessionStorage.setItem(promptKey, 'shown');
-    }
-  }, [user]);
-
-  const handleCloseContentModal = () => {
-    setIsContentModalOpen(false);
-  };
+export default function OverviewPage() {
+  const [selectedAudit, setSelectedAudit] = useState<AuditRow | null>(null);
+  const [showModal, setShowModal] = useState(false);
 
   return (
-    <>
-      <DashboardShell>
-        <div className="mb-8 rounded-[2rem] border border-cyan-200/70 bg-gradient-to-r from-cyan-50 via-white to-blue-50 p-6 shadow-sm">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-            <div className="space-y-2">
-              <p className="text-sm uppercase tracking-[0.28em] text-cyan-700">Content intake</p>
-              <h2 className="text-2xl font-bold tracking-tight text-slate-950">Register protected assets from one panel</h2>
-              <p className="max-w-2xl text-sm leading-6 text-slate-600">
-                Use the content registration popup to submit video, image, or audio assets together with the associated license file.
+    <MainLayout
+      breadcrumb={[{ label: 'Overview' }]}
+      contextPanelTitle={selectedAudit ? `Audit ${selectedAudit.id}` : 'Details'}
+      contextPanelContent={
+        selectedAudit && (
+          <div className="space-y-4">
+            <div>
+              <p className="text-xs text-text-secondary uppercase letter-spacing-wide font-semibold">
+                Asset ID
               </p>
+              <p className="text-sm text-text-primary font-mono">{selectedAudit.assetId}</p>
             </div>
-            <button
-              type="button"
-              onClick={() => setIsContentModalOpen(true)}
-              className="rounded-2xl bg-slate-950 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800"
+            <div>
+              <p className="text-xs text-text-secondary uppercase letter-spacing-wide font-semibold">
+                Confidence
+              </p>
+              <div className="mt-1">
+                <ConfidenceBadge value={selectedAudit.confidence} />
+              </div>
+            </div>
+            <div>
+              <p className="text-xs text-text-secondary uppercase letter-spacing-wide font-semibold">
+                Policy
+              </p>
+              <p className="text-sm text-text-primary">{selectedAudit.policy}</p>
+            </div>
+            <div>
+              <p className="text-xs text-text-secondary uppercase letter-spacing-wide font-semibold">
+                Status
+              </p>
+              <div className="mt-2">
+                <StatusChip status={selectedAudit.decision} />
+              </div>
+            </div>
+          </div>
+        )
+      }
+      contextPanelActions={
+        selectedAudit && (
+          <>
+            <Button variant="secondary" size="sm" onClick={() => setSelectedAudit(null)}>
+              Close
+            </Button>
+            <Button size="sm" onClick={() => setShowModal(true)}>
+              View Details
+            </Button>
+          </>
+        )
+      }
+      isContextPanelOpen={!!selectedAudit}
+      onContextPanelClose={() => setSelectedAudit(null)}
+    >
+      {/* Main Content */}
+      <div className="space-y-8">
+        {/* Hero Section */}
+        <div className="space-y-2">
+          <h1 className="text-4xl font-bold text-text-primary">Overview</h1>
+          <p className="text-lg text-text-secondary">
+            Monitor ML model audits, decisions, and explainability metrics
+          </p>
+        </div>
+
+        {/* KPI Metrics */}
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+          {[
+            { label: 'Ingested Today', value: '14,302', icon: '📥' },
+            { label: 'Decisions Made', value: '9,847', icon: '✓' },
+            { label: 'HITL Queue', value: '12', icon: '👥' },
+            { label: 'Privacy Budget', value: 'ε: 0.73', icon: '🔒' },
+          ].map((metric) => (
+            <div
+              key={metric.label}
+              className="p-6 rounded-lg border border-border-default bg-surface-secondary hover:bg-surface-tertiary transition-colors duration-fast"
             >
-              Open registration popup
-            </button>
+              <div className="flex items-start justify-between">
+                <div>
+                  <p className="text-sm text-text-secondary uppercase font-semibold letter-spacing-wide">
+                    {metric.label}
+                  </p>
+                  <p className="text-3xl font-bold text-text-primary mt-2">{metric.value}</p>
+                </div>
+                <span className="text-3xl">{metric.icon}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Demo Buttons */}
+        <div className="space-y-4">
+          <h2 className="text-xl font-semibold text-text-primary">Component Examples</h2>
+
+          <div className="space-y-3">
+            <div>
+              <h3 className="text-sm font-medium text-text-secondary mb-3">Confidence Badges</h3>
+              <div className="flex items-center gap-6 p-4 bg-surface-secondary rounded-lg border border-border-default">
+                <div>
+                  <p className="text-xs text-text-secondary mb-2">High (≥0.80)</p>
+                  <ConfidenceBadge value={0.87} />
+                </div>
+                <div>
+                  <p className="text-xs text-text-secondary mb-2">Mid (0.20–0.79)</p>
+                  <ConfidenceBadge value={0.45} />
+                </div>
+                <div>
+                  <p className="text-xs text-text-secondary mb-2">Low (&lt;0.20)</p>
+                  <ConfidenceBadge value={0.12} />
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <h3 className="text-sm font-medium text-text-secondary mb-3">Status Chips</h3>
+              <div className="flex flex-wrap items-center gap-3 p-4 bg-surface-secondary rounded-lg border border-border-default">
+                <StatusChip status="approved" />
+                <StatusChip status="rejected" />
+                <StatusChip status="pending" />
+                <StatusChip status="flagged" />
+                <StatusChip status="anchored" />
+                <StatusChip status="reviewing" />
+              </div>
+            </div>
+
+            <div>
+              <h3 className="text-sm font-medium text-text-secondary mb-3">Buttons</h3>
+              <div className="flex flex-wrap items-center gap-3 p-4 bg-surface-secondary rounded-lg border border-border-default">
+                <Button variant="primary" size="md">
+                  Primary
+                </Button>
+                <Button variant="secondary" size="md">
+                  Secondary
+                </Button>
+                <Button variant="danger" size="md">
+                  Danger
+                </Button>
+                <Button variant="ghost" size="md">
+                  Ghost
+                </Button>
+                <Button disabled size="md">
+                  Disabled
+                </Button>
+                <Button isLoading size="md">
+                  Loading
+                </Button>
+              </div>
+            </div>
           </div>
         </div>
 
-        <div className="grid gap-8 xl:grid-cols-[1.3fr_0.7fr]">
-          <section className="space-y-8">
-            <OverviewMetrics />
-            <OverviewCards />
-            <LiveActivityFeed />
-
-            <div className="rounded-[2rem] border border-slate-200/70 bg-white/90 p-8 shadow-sm backdrop-blur-sm">
-              <div className="mb-6">
-                <p className="text-sm uppercase tracking-[0.28em] text-slate-400">Phase 2 · XAI</p>
-                <h2 className="mt-2 text-2xl font-bold text-slate-950">Saliency / Drift Viewer</h2>
-              </div>
-              <SaliencyDriftViewer points={xaiPoints} />
-            </div>
-
-            <div className="rounded-[2rem] border border-slate-200/70 bg-white/90 p-8 shadow-sm backdrop-blur-sm">
-              <div className="mb-6">
-                <p className="text-sm uppercase tracking-[0.28em] text-slate-400">Phase 2 · Federated Learning</p>
-                <h2 className="mt-2 text-2xl font-bold text-slate-950">Edge Topology Health</h2>
-              </div>
-              <FLHealthMonitor nodes={flNodes} />
-            </div>
-          </section>
-          <section className="space-y-8">
-            <ThreatQueue />
-
-            <div className="rounded-[2rem] border border-slate-200/70 bg-white/90 p-8 shadow-sm backdrop-blur-sm">
-              <div className="mb-6">
-                <p className="text-sm uppercase tracking-[0.28em] text-slate-400">Phase 2 · HITL</p>
-                <h2 className="mt-2 text-2xl font-bold text-slate-950">Decision Queue (Live)</h2>
-              </div>
-              <HITLDecisionQueue maxItems={120} />
-            </div>
-
-            {/* Admin-only: Approved HITL Decisions */}
-            {user?.role === 'admin' && (
-              <div className="rounded-[2rem] border border-slate-200/70 bg-white/90 p-8 shadow-sm backdrop-blur-sm">
-                <div className="mb-6">
-                  <p className="text-sm uppercase tracking-[0.28em] text-slate-400">HITL Approvals</p>
-                  <h2 className="mt-2 text-2xl font-bold text-slate-950">Recent Decisions</h2>
-                  <p className="mt-2 text-sm text-slate-600">Approved piracy threat authentications from reviewers</p>
-                </div>
-                <HITLApprovalSummary />
-              </div>
-            )}
-          </section>
+        {/* Audit Table */}
+        <div className="space-y-4">
+          <h2 className="text-xl font-semibold text-text-primary">Recent Audits</h2>
+          <DataTable<AuditRow>
+            columns={[
+              {
+                key: 'id',
+                label: 'ID',
+                sortable: true,
+                width: '140px',
+                render: (val) => (
+                  <code className="text-xs font-mono text-accent">{val}</code>
+                ),
+              },
+              {
+                key: 'assetId',
+                label: 'Asset ID',
+                sortable: true,
+                render: (val) => (
+                  <code className="text-xs font-mono text-text-secondary">{val}</code>
+                ),
+              },
+              {
+                key: 'confidence',
+                label: 'Confidence',
+                sortable: true,
+                render: (val) => <ConfidenceBadge value={val} size="sm" />,
+              },
+              {
+                key: 'decision',
+                label: 'Decision',
+                sortable: true,
+                render: (val) => <StatusChip status={val} size="sm" />,
+              },
+              {
+                key: 'policy',
+                label: 'Policy',
+                sortable: true,
+              },
+              {
+                key: 'timestamp',
+                label: 'Timestamp',
+                sortable: true,
+                render: (val) => (
+                  <span className="text-xs text-text-secondary">{val}</span>
+                ),
+              },
+            ]}
+            rows={DEMO_AUDITS}
+            onRowClick={(row) => setSelectedAudit(row)}
+          />
         </div>
-      </DashboardShell>
 
-      {user && (
-        <ContentRegistrationModal
-          isOpen={isContentModalOpen}
-          onClose={handleCloseContentModal}
-          userId={user.id}
-          userName={user.name}
-        />
-      )}
-    </>
+        {/* Modal Button */}
+        <div className="space-y-4">
+          <h2 className="text-xl font-semibold text-text-primary">Modal Example</h2>
+          <Button onClick={() => setShowModal(true)}>Open Modal</Button>
+        </div>
+      </div>
+
+      {/* Modal */}
+      <Modal
+        isOpen={showModal}
+        onClose={() => setShowModal(false)}
+        title="Audit Details"
+        size="md"
+        actions={
+          <>
+            <Button variant="secondary" onClick={() => setShowModal(false)}>
+              Cancel
+            </Button>
+            <Button onClick={() => setShowModal(false)}>Confirm</Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-text-secondary">
+            This is a modal dialog showing the details of the selected audit record.
+          </p>
+          <div className="p-4 bg-surface-tertiary rounded-lg border border-border-default">
+            <p className="text-xs text-text-secondary uppercase letter-spacing-wide font-semibold mb-2">
+              Audit Information
+            </p>
+            <div className="space-y-2 text-sm">
+              <div>
+                <span className="text-text-secondary">ID:</span>{' '}
+                <code className="text-accent font-mono">AUDIT-001</code>
+              </div>
+              <div>
+                <span className="text-text-secondary">Status:</span>{' '}
+                <span>✓ APPROVED</span>
+              </div>
+              <div>
+                <span className="text-text-secondary">Confidence:</span> 87%
+              </div>
+            </div>
+          </div>
+        </div>
+      </Modal>
+    </MainLayout>
   );
 }
