@@ -62,13 +62,21 @@ class GraphDBService:
                 SET a.modality = $modality,
                     a.source = $source,
                     a.filename = $filename,
-                    a.is_flagged = $is_flagged
+                    a.is_flagged = $is_flagged,
+                    a.authorization_status = $authorization_status,
+                    a.decision_label = $decision_label,
+                    a.decision_confidence = $decision_confidence,
+                    a.source_tier = $source_tier
                 """,
                 asset_id=asset_id,
                 modality=metadata.get("modality"),
                 source=metadata.get("source"),
                 filename=metadata.get("filename"),
                 is_flagged=bool(metadata.get("is_flagged", False)),
+                authorization_status=metadata.get("authorization_status"),
+                decision_label=metadata.get("decision_label"),
+                decision_confidence=float(metadata.get("decision_confidence", 0.0)),
+                source_tier=metadata.get("source_tier"),
             )
 
             creator_id = metadata.get("creator_id")

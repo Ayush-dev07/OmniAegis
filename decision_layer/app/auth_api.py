@@ -204,9 +204,14 @@ def _firestore_client() -> firestore.Client:
 def _verify_firebase_token(token: str) -> dict[str, Any]:
     try:
         _build_firebase_app()
-    except HTTPException:
-        raise
+    except HTTPException as he:
+        logger.warning("Firebase credentials unavailable: %s", he.detail)
+        raise HTTPException(
+            status_code=503,
+            detail="Firebase credentials not configured. Set FIREBASE_SERVICE_ACCOUNT_JSON or FIREBASE_SERVICE_ACCOUNT_PATH in .env"
+        ) from he
     except Exception as exc:
+        logger.warning("Firebase initialization error: %s", exc)
         raise HTTPException(status_code=503, detail="Firebase Admin initialization failed") from exc
 
     try:
@@ -215,6 +220,7 @@ def _verify_firebase_token(token: str) -> dict[str, Any]:
     except HTTPException:
         raise
     except Exception as exc:
+        logger.warning("Firebase token verification failed: %s", exc)
         raise HTTPException(status_code=401, detail="Invalid or expired Firebase token") from exc
 
 
@@ -302,8 +308,25 @@ def _upsert_firestore_profile(claims: dict[str, Any], body: SyncRequest | None =
 
 async def get_current_user(authorization: str | None = Header(default=None)) -> AuthUser:
     token = _extract_bearer_token(authorization)
-    claims = _verify_firebase_token(token)
-    return _upsert_firestore_profile(claims, None)
+    try:
+        claims = _verify_firebase_token(token)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Firebase token verification failed: %s", exc)
+        raise HTTPException(
+            status_code=503, 
+            detail="Firebase credentials not configured. Set FIREBASE_SERVICE_ACCOUNT_JSON or FIREBASE_SERVICE_ACCOUNT_PATH in .env"
+        ) from exc
+    
+    try:
+        return _upsert_firestore_profile(claims, None)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("Firestore profile sync failed (non-critical): %s", exc)
+        # Return user from token claims if Firestore is unavailable
+        return _build_auth_user_from_claims(claims, None)
 
 
 async def require_admin(current_user: AuthUser = Depends(get_current_user)) -> AuthUser:
@@ -317,9 +340,31 @@ async def sync_session(
     body: SyncRequest,
     authorization: str | None = Header(default=None),
 ) -> AuthResponse:
+    """Sync session with Firestore and Qdrant.
+    
+    Returns 503 if Firebase credentials are not configured.
+    """
     token = _extract_bearer_token(authorization)
-    claims = _verify_firebase_token(token)
-    user = _upsert_firestore_profile(claims, body)
+    try:
+        claims = _verify_firebase_token(token)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Firebase token verification failed: %s", exc)
+        raise HTTPException(
+            status_code=503, 
+            detail="Firebase credentials not configured. Set FIREBASE_SERVICE_ACCOUNT_JSON or FIREBASE_SERVICE_ACCOUNT_PATH in .env"
+        ) from exc
+    
+    try:
+        user = _upsert_firestore_profile(claims, body)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("Firestore profile sync failed (non-critical): %s", exc)
+        # Create minimal user from token if Firestore is unavailable
+        user = _build_auth_user_from_claims(claims, None)
+    
     return AuthResponse(user=user, access_token=token)
 
 

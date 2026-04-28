@@ -120,14 +120,14 @@ export default function LoginPage() {
                 {/* Email Field */}
                 <div className="space-y-2">
                   <label htmlFor="email" className="text-sm font-semibold text-slate-900">
-                    Email
+                    {mode === 'login' ? 'Email or Username' : 'Email'}
                   </label>
                   <input
                     id="email"
-                    type="email"
+                    type={mode === 'login' ? 'text' : 'email'}
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
-                    placeholder="you@example.com"
+                    placeholder={mode === 'login' ? 'you@example.com or admin' : 'you@example.com'}
                     className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent transition"
                     required
                   />
@@ -196,12 +196,12 @@ export default function LoginPage() {
                   <div className="space-y-2 text-sm">
                     <div className="rounded-2xl bg-slate-50 p-3">
                       <p className="font-mono text-slate-600">
-                        <span className="text-slate-400">Admin:</span> admin@sentinelai.com / admin123
+                        <span className="text-slate-400">Admin:</span> admin@sentinelai.com / admin123 (or admin / password)
                       </p>
                     </div>
                     <div className="rounded-2xl bg-slate-50 p-3">
                       <p className="font-mono text-slate-600">
-                        <span className="text-slate-400">Reviewer:</span> reviewer@sentinelai.com / reviewer123
+                        <span className="text-slate-400">Reviewer:</span> reviewer@sentinelai.com / reviewer123 (or reviewer / password)
                       </p>
                     </div>
                   </div>

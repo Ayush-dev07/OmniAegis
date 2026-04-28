@@ -42,11 +42,19 @@ _bootstrap_env()
 from app.config import QdrantClientSingleton, load_qdrant_settings
 from app.auth_api import router as auth_router
 from app.batch_api import router as batch_router
-from app.fingerprinters import AudioFingerprinter, ImageFingerprinter, SemanticEmbedder, VideoFingerprinter
+from app.fingerprinters import AudioFingerprinter, ImageFingerprinter, VideoFingerprinter
+from app.fingerprinters.image_features import ImageFeatureExtractor
 from app.hitl_api import router as hitl_router
 from app.xai_api import router as xai_router
 from app.registry import RegistryManager
 from app.schemas import FingerprintResponse, MatchItem, MatchResponse, Modality
+
+try:
+    from app.fingerprinters.semantic_embedder import SemanticEmbedder
+    _SEMANTIC_IMPORT_ERROR: str | None = None
+except Exception as exc:  # pragma: no cover - optional heavy dependency
+    SemanticEmbedder = None
+    _SEMANTIC_IMPORT_ERROR = str(exc)
 
 try:
     from decision_layer.services.audit_service import LocalPrivateKeySigner
@@ -79,7 +87,24 @@ logger = logging.getLogger(__name__)
 image_fp = ImageFingerprinter()
 video_fp = VideoFingerprinter(frames_to_sample=16)
 audio_fp = AudioFingerprinter()
-semantic_fp = SemanticEmbedder(embedding_dim=512)
+SEMANTIC_EMBEDDING_DIM = 512
+semantic_fp: Any | None = None
+image_feature_extractor: ImageFeatureExtractor | None = None
+
+if SemanticEmbedder is not None:
+    try:
+        semantic_fp = SemanticEmbedder(embedding_dim=SEMANTIC_EMBEDDING_DIM)
+    except Exception as exc:
+        logger.warning("Semantic embedder initialization skipped: %s", exc)
+else:
+    logger.warning("Semantic embedder unavailable: %s", _SEMANTIC_IMPORT_ERROR)
+
+try:
+    image_feature_extractor = ImageFeatureExtractor(feature_dim=512)
+    logger.info("Image feature extractor initialized")
+except Exception as exc:
+    logger.warning("Image feature extractor initialization skipped: %s", exc)
+
 GLOBAL_METRICS = MetricsRegistry()
 gateway_router = APIRouter(tags=["gateway"])
 
@@ -93,6 +118,21 @@ def _build_batch_signer() -> LocalPrivateKeySigner | None:
 
 def _is_truthy(value: str | None) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _semantic_unavailable_detail() -> str:
+    if _SEMANTIC_IMPORT_ERROR:
+        return (
+            "Semantic embedding unavailable because optional dependency import failed: "
+            f"{_SEMANTIC_IMPORT_ERROR}. Install backend Python dependencies in the same venv used by backend:dev."
+        )
+    return "Semantic embedding is currently unavailable in this backend runtime."
+
+
+def _require_semantic() -> Any:
+    if semantic_fp is None:
+        raise HTTPException(status_code=503, detail=_semantic_unavailable_detail())
+    return semantic_fp
 
 
 @asynccontextmanager
@@ -112,7 +152,7 @@ async def lifespan(app: FastAPI):
         qdrant_client = QdrantClientSingleton.get_client(settings)
         app.state.registry = RegistryManager(
             audio_dim=audio_fp.embedding_dim,
-            semantic_dim=semantic_fp.embedding_dim,
+            semantic_dim=semantic_fp.embedding_dim if semantic_fp is not None else SEMANTIC_EMBEDDING_DIM,
             qdrant_client=qdrant_client,
             semantic_collection_name=settings.collection_name,
             hnsw_m=settings.hnsw_m,
@@ -164,33 +204,44 @@ async def lifespan(app: FastAPI):
         batch_coordinator = None
     app.state.batch_coordinator = batch_coordinator
 
+    app.state.visual_explainer = None
+    app.state.graph_builder = None
+    app.state.rights_model = None
+    app.state.graph_explainer = None
+
     # Stage-7 explainability components (lazy-imported to avoid hard startup coupling).
-    explainers_module = import_module("app.reasoning.explainers")
-    graph_builder_module = import_module("app.reasoning.graph_builder")
-    rights_model_module = import_module("app.reasoning.model")
+    if semantic_fp is not None:
+        try:
+            explainers_module = import_module("app.reasoning.explainers")
+            graph_builder_module = import_module("app.reasoning.graph_builder")
+            rights_model_module = import_module("app.reasoning.model")
 
-    visual_explainer_cls = getattr(explainers_module, "VisualExplainer")
-    graph_explainer_cls = getattr(explainers_module, "GraphExplainer")
-    graph_builder_cls = getattr(graph_builder_module, "GraphBuilder")
-    rights_gnn_cls = getattr(rights_model_module, "RightsGNN")
+            visual_explainer_cls = getattr(explainers_module, "VisualExplainer")
+            graph_explainer_cls = getattr(explainers_module, "GraphExplainer")
+            graph_builder_cls = getattr(graph_builder_module, "GraphBuilder")
+            rights_gnn_cls = getattr(rights_model_module, "RightsGNN")
 
-    app.state.visual_explainer = visual_explainer_cls(semantic_fp)
-    app.state.graph_builder = graph_builder_cls(graph_db=app.state.graph_db)
-    app.state.rights_model = rights_gnn_cls()
-    app.state.graph_explainer = graph_explainer_cls(app.state.rights_model)
+            app.state.visual_explainer = visual_explainer_cls(semantic_fp)
+            app.state.graph_builder = graph_builder_cls(graph_db=app.state.graph_db)
+            app.state.rights_model = rights_gnn_cls()
+            app.state.graph_explainer = graph_explainer_cls(app.state.rights_model)
+        except Exception as exc:
+            logger.warning("Explainability components initialization skipped: %s", exc)
 
     xai_storage = None
     umap_projector = None
     try:
-        xai_storage = ExplainabilityStorage.from_env()
+        xai_storage = await asyncio.wait_for(asyncio.to_thread(ExplainabilityStorage.from_env), timeout=5.0)
         app.state.xai_storage = xai_storage
-    except Exception:
+    except Exception as exc:
+        logger.warning("XAI storage initialization skipped: %s", exc)
         app.state.xai_storage = None
 
     try:
-        umap_projector = UMAPProjector.from_env()
+        umap_projector = await asyncio.wait_for(asyncio.to_thread(UMAPProjector.from_env), timeout=5.0)
         app.state.umap_projector = umap_projector
-    except Exception:
+    except Exception as exc:
+        logger.warning("UMAP projector initialization skipped: %s", exc)
         app.state.umap_projector = None
 
     try:
@@ -338,13 +389,14 @@ def _match_results_to_schema(
 def _build_image_explanation(content: bytes, top_k: int, owner_user_id: str | None = None) -> dict[str, Any]:
     visual, graph_builder, graph_explainer = _xai_components()
     registry = _registry()
+    semantic = semantic_fp
 
-    if visual is None or graph_builder is None or graph_explainer is None:
+    if semantic is None or visual is None or graph_builder is None or graph_explainer is None:
         return {"visual_highlights": [], "contextual_factors": []}
 
     try:
-        image = semantic_fp._load_rgb_image_from_bytes(content)  # noqa: SLF001 - private helper reuse for contract consistency
-        image_tensor = semantic_fp.transform(image)
+        image = semantic._load_rgb_image_from_bytes(content)  # noqa: SLF001 - private helper reuse for contract consistency
+        image_tensor = semantic.transform(image)
         heatmap = visual.get_visual_explanation(image_tensor)
         boxes = visual.heatmap_to_bounding_boxes(heatmap, top_k=3)
     except Exception:
@@ -352,16 +404,16 @@ def _build_image_explanation(content: bytes, top_k: int, owner_user_id: str | No
 
     contextual_factors: list[dict[str, Any]] = []
     try:
-        semantic = semantic_fp.embed_from_bytes(content)
+        semantic_embedding = semantic.embed_from_bytes(content)
         phash = image_fp.fingerprint_from_bytes(content)
         semantic_matches = registry.match_semantic(
-            semantic["embedding"],
+            semantic_embedding["embedding"],
             top_k=top_k,
             modality_filter="image",
             owner_user_id=owner_user_id,
         )
         subgraph = graph_builder.build_subgraph(
-            query_embedding=semantic["embedding"],
+            query_embedding=semantic_embedding["embedding"],
             qdrant_results=semantic_matches,
             query_metadata={"asset_id": f"query:{phash['hash_hex']}", "modality": "image"},
         )
@@ -402,19 +454,40 @@ async def fingerprint_image(
                 },
             )
 
-            # Stage-2 semantic registration for derivative-work matching.
-            semantic = semantic_fp.embed_from_bytes(content)
-            registry.register_semantic(
-                asset_id=assigned_id,
-                embedding=semantic["embedding"],
-                metadata={
-                    "modality": "image",
-                    "semantic_embedding_dim": semantic["embedding_dim"],
-                    "source": source,
-                    "filename": file.filename,
-                    "user_id": owner_user_id,
-                },
-            )
+            # Stage-1: Extract deep visual features and store in Qdrant
+            if image_feature_extractor is not None:
+                try:
+                    features = image_feature_extractor.embed_from_bytes(content)
+                    registry.register_semantic(
+                        asset_id=assigned_id,
+                        embedding=features["embedding"],
+                        metadata={
+                            "modality": "image",
+                            "feature_type": "visual_features",
+                            "embedding_dim": features["embedding_dim"],
+                            "source": source,
+                            "filename": file.filename,
+                            "user_id": owner_user_id,
+                        },
+                    )
+                except Exception as exc:
+                    logger.warning("Image feature extraction skipped: %s", exc)
+
+            # Stage-2: semantic registration for derivative-work matching.
+            if semantic_fp is not None:
+                semantic = semantic_fp.embed_from_bytes(content)
+                registry.register_semantic(
+                    asset_id=assigned_id,
+                    embedding=semantic["embedding"],
+                    metadata={
+                        "modality": "image",
+                        "feature_type": "semantic_embeddings",
+                        "semantic_embedding_dim": semantic["embedding_dim"],
+                        "source": source,
+                        "filename": file.filename,
+                        "user_id": owner_user_id,
+                    },
+                )
 
         return FingerprintResponse(
             modality=Modality.image,
@@ -442,8 +515,9 @@ async def fingerprint_semantic_image(
 ) -> dict[str, Any]:
     try:
         registry = _registry()
+        semantic_embedder = _require_semantic()
         content = await file.read()
-        semantic = semantic_fp.embed_from_bytes(content)
+        semantic = semantic_embedder.embed_from_bytes(content)
         owner_user_id = _normalize_user_id(user_id, required=register)
 
         assigned_id = asset_id or str(uuid.uuid4())
@@ -645,6 +719,81 @@ async def match_asset(
         raise HTTPException(status_code=500, detail=f"Matching failed: {exc}") from exc
 
 
+@app.post("/match/image/visual-features")
+async def match_image_visual_features(
+    file: UploadFile = File(...),
+    top_k: int = Form(5),
+    user_id: str = Form(...),
+) -> dict[str, Any]:
+    """Find similar images using deep visual features (ResNet50).
+
+    Query the Qdrant vector database with image embeddings to find visually
+    similar registered assets. Results are filtered by user_id.
+
+    Args:
+        file: Image file to query
+        top_k: Number of results (1-50, default 5)
+        user_id: User ID for filtering results
+
+    Returns:
+        Dict with matched assets and their visual similarity scores.
+    """
+    if top_k < 1 or top_k > 50:
+        raise HTTPException(status_code=400, detail="top_k must be between 1 and 50")
+
+    if image_feature_extractor is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Image feature extractor is not available. "
+            "Install PyTorch and torchvision to enable this feature.",
+        )
+
+    try:
+        registry = _registry()
+        owner_user_id = _normalize_user_id(user_id, required=True)
+        content = await file.read()
+
+        # Extract visual features from query image
+        features = image_feature_extractor.embed_from_bytes(content)
+        query_embedding = features["embedding"]
+
+        # Query Qdrant semantic collection (visual features are stored there)
+        results = registry.match_semantic(
+            embedding=query_embedding,
+            top_k=top_k,
+            owner_user_id=owner_user_id,
+            modality_filter="image",
+        )
+
+        # Build response
+        matched_items: list[dict[str, Any]] = []
+        for result in results:
+            matched_items.append(
+                {
+                    "asset_id": result.asset_id,
+                    "confidence": result.confidence,
+                    "similarity_score": result.distance_or_similarity,
+                    "metadata": result.metadata,
+                }
+            )
+
+        return {
+            "query_modality": "image",
+            "query_feature_type": "visual_features",
+            "query_embedding_dim": features["embedding_dim"],
+            "top_k": top_k,
+            "results": matched_items,
+            "total_matches": len(matched_items),
+        }
+
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - defensive path
+        raise HTTPException(status_code=500, detail=f"Visual feature matching failed: {exc}") from exc
+
+
 @app.post("/verify/image/slow-gate")
 async def verify_image_slow_gate(
     file: UploadFile = File(...),
@@ -686,26 +835,29 @@ async def verify_image_slow_gate(
         }
 
         if should_trigger_semantic:
-            semantic = semantic_fp.embed_from_bytes(content)
-            semantic_matches = registry.match_semantic(
-                semantic["embedding"],
-                top_k=top_k,
-                modality_filter=modality_filter,
-                owner_user_id=owner_user_id,
-            )
+            if semantic_fp is None:
+                slow_gate["unavailable_reason"] = _semantic_unavailable_detail()
+            else:
+                semantic = semantic_fp.embed_from_bytes(content)
+                semantic_matches = registry.match_semantic(
+                    semantic["embedding"],
+                    top_k=top_k,
+                    modality_filter=modality_filter,
+                    owner_user_id=owner_user_id,
+                )
 
-            slow_gate["matches"] = [
-                {
-                    "asset_id": m.asset_id,
-                    "cosine_similarity": m.distance_or_similarity,
-                    "confidence": m.confidence,
-                    "metadata": m.metadata,
-                }
-                for m in semantic_matches
-            ]
+                slow_gate["matches"] = [
+                    {
+                        "asset_id": m.asset_id,
+                        "cosine_similarity": m.distance_or_similarity,
+                        "confidence": m.confidence,
+                        "metadata": m.metadata,
+                    }
+                    for m in semantic_matches
+                ]
 
-            if semantic_matches and semantic_matches[0].distance_or_similarity > semantic_alert_threshold:
-                slow_gate["potential_derivative_piracy"] = True
+                if semantic_matches and semantic_matches[0].distance_or_similarity > semantic_alert_threshold:
+                    slow_gate["potential_derivative_piracy"] = True
 
         return {
             "stage_1": {
