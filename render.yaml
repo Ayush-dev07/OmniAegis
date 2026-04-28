@@ -1,0 +1,48 @@
+services:
+  - type: web
+    name: omniaegis-decision-layer
+    runtime: docker
+    dockerContext: ./decision_layer
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: "8000"
+      - key: SKIP_STARTUP_DEPENDENCY_CHECK
+        value: "1"
+      - key: REDIS_URL
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: NEO4J_URI
+        sync: false
+      - key: NEO4J_USERNAME
+        sync: false
+      - key: NEO4J_PASSWORD
+        sync: false
+      - key: QDRANT_URL
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
+      - key: GRAFANA_PROMETHEUS_URL
+        sync: false
+      - key: GRAFANA_API_KEY
+        sync: false
+      - key: PINATA_API_KEY
+        sync: false
+      - key: WEB3_PROVIDER_URL
+        sync: false
+
+  - type: web
+    name: omniaegis-analysis-engine
+    runtime: docker
+    dockerContext: ./analysis_engine
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: "8090"
+      - key: REDIS_URL
+        sync: false

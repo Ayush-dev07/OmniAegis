@@ -1,0 +1,54 @@
+services:
+  frontend:
+    build:
+      context: ./frontend/OmniAegis-Frontend-main
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - SKIP_ENV_VALIDATION=1
+    depends_on:
+      - backend
+    networks:
+      - omniaegis
+
+  backend:
+    build:
+      context: ./decision_layer
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_URL=${REDIS_URL}
+      - DATABASE_URL=${DATABASE_URL}
+      - NEO4J_URI=${NEO4J_URI}
+      - NEO4J_USERNAME=${NEO4J_USERNAME}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
+      - QDRANT_URL=${QDRANT_URL}
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+      - GRAFANA_PROMETHEUS_URL=${GRAFANA_PROMETHEUS_URL}
+      - GRAFANA_API_KEY=${GRAFANA_API_KEY}
+      - PINATA_API_KEY=${PINATA_API_KEY}
+      - WEB3_PROVIDER_URL=${WEB3_PROVIDER_URL}
+      - SKIP_STARTUP_DEPENDENCY_CHECK=1
+    networks:
+      - omniaegis
+
+  analysis_engine:
+    build:
+      context: ./analysis_engine
+      dockerfile: Dockerfile
+    ports:
+      - "8090:8090"
+    environment:
+      - REDIS_URL=${REDIS_URL}
+      - ANALYSIS_ENGINE_PORT=8090
+    depends_on:
+      - backend
+    networks:
+      - omniaegis
+
+networks:
+  omniaegis:
+    driver: bridge

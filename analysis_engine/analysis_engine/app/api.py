@@ -78,5 +78,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("ANALYSIS_ENGINE_PORT", "8090")))
+    # Managed platforms typically provide PORT; keep ANALYSIS_ENGINE_PORT for local backward compatibility.
+    port = int(os.getenv("PORT", os.getenv("ANALYSIS_ENGINE_PORT", "8090")))
+    uvicorn.run(app, host="0.0.0.0", port=port)
 

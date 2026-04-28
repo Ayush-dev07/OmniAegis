@@ -8,8 +8,8 @@
     "build": "npm --prefix frontend/OmniAegis-Frontend-main run build",
     "start": "npm --prefix frontend/OmniAegis-Frontend-main run start",
     "lint": "npm --prefix frontend/OmniAegis-Frontend-main run lint",
-    "backend:dev": "cd decision_layer && /home/ayush02/Desktop/OmniAegis/.venv/bin/python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000",
-    "backend:install": "cd decision_layer && /home/ayush02/Desktop/OmniAegis/.venv/bin/python -m pip install -r requirements.txt",
+    "backend:dev": "cd decision_layer && python3 -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000",
+    "backend:install": "cd decision_layer && python3 -m pip install -r requirements.txt",
     "setup": "npm install --prefix frontend/OmniAegis-Frontend-main && npm run backend:install"
   },
   "dependencies": {
