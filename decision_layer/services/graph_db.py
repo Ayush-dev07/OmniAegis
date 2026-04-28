@@ -14,11 +14,11 @@ class GraphDBService:
         uri: str,
         user: str,
         password: str,
-        database: str = "neo4j",
+        database: str | None = None,
         max_connection_pool_size: int = 20,
     ) -> None:
         self.uri = uri
-        self.database = database
+        self.database = (database or "").strip() or None
         self.driver = GraphDatabase.driver(
             uri,
             auth=(user, password),
@@ -27,12 +27,25 @@ class GraphDBService:
 
     @classmethod
     def from_env(cls) -> GraphDBService:
-        uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
-        user = os.getenv("NEO4J_USER", "neo4j")
-        password = os.getenv("NEO4J_PASSWORD", "neo4j")
-        database = os.getenv("NEO4J_DATABASE", "neo4j")
+        uri = (os.getenv("NEO4J_URI") or "bolt://localhost:7687").strip().strip('"').strip("'")
+        user = (
+            os.getenv("NEO4J_USER")
+            or os.getenv("NEO4J_USERNAME")
+            or "neo4j"
+        ).strip().strip('"').strip("'")
+        password = (os.getenv("NEO4J_PASSWORD") or "neo4j").strip().strip('"').strip("'")
+        database = (
+            os.getenv("NEO4J_DATABASE")
+            or os.getenv("NEO4J_DB")
+            or ""
+        ).strip().strip('"').strip("'")
         pool_size = int(os.getenv("NEO4J_POOL_SIZE", "20"))
         return cls(uri=uri, user=user, password=password, database=database, max_connection_pool_size=pool_size)
+
+    def _open_session(self):
+        if self.database:
+            return self.driver.session(database=self.database)
+        return self.driver.session()
 
     def close(self) -> None:
         self.driver.close()
@@ -44,7 +57,7 @@ class GraphDBService:
             "CREATE CONSTRAINT licensee_id_unique IF NOT EXISTS FOR (l:Licensee) REQUIRE l.licensee_id IS UNIQUE",
             "CREATE INDEX asset_modality_idx IF NOT EXISTS FOR (a:Asset) ON (a.modality)",
         ]
-        with self.driver.session(database=self.database) as session:
+        with self._open_session() as session:
             for q in queries:
                 session.run(q)
 
@@ -55,39 +68,70 @@ class GraphDBService:
         neighbors: list[dict[str, Any]] | None = None,
     ) -> None:
         neighbors = neighbors or []
-        with self.driver.session(database=self.database) as session:
-            session.run(
-                """
-                MERGE (a:Asset {asset_id: $asset_id})
-                SET a.modality = $modality,
-                    a.source = $source,
-                    a.filename = $filename,
-                    a.title = $title,
-                    a.user_id = $user_id,
-                    a.is_flagged = $is_flagged,
-                    a.authorization_status = $authorization_status,
-                    a.decision_label = $decision_label,
-                    a.decision_confidence = $decision_confidence,
-                    a.source_tier = $source_tier,
-                    a.license_file_name = $license_file_name,
-                    a.license_content_type = $license_content_type,
-                    a.uploaded_at = $uploaded_at
-                """,
-                asset_id=asset_id,
-                modality=metadata.get("modality"),
-                source=metadata.get("source"),
-                filename=metadata.get("filename"),
-                title=metadata.get("title"),
-                user_id=metadata.get("user_id"),
-                is_flagged=bool(metadata.get("is_flagged", False)),
-                authorization_status=metadata.get("authorization_status"),
-                decision_label=metadata.get("decision_label"),
-                decision_confidence=float(metadata.get("decision_confidence", 0.0)),
-                source_tier=metadata.get("source_tier"),
-                license_file_name=metadata.get("license_file_name"),
-                license_content_type=metadata.get("license_content_type"),
-                uploaded_at=metadata.get("uploaded_at"),
-            )
+        with self._open_session() as session:
+            # Prepare metadata with type coercion for known fields
+            metadata_to_set = {}
+            
+            # Known fields with specific type handling
+            known_fields = {
+                "modality": str,
+                "source": str,
+                "filename": str,
+                "title": str,
+                "user_id": str,
+                "is_flagged": bool,
+                "authorization_status": str,
+                "decision_label": str,
+                "decision_confidence": float,
+                "source_tier": str,
+                "license_file_name": str,
+                "license_content_type": str,
+                "uploaded_at": str,
+                "content_type": str,
+                "storage_url": str,
+            }
+            
+            # Process known fields with type conversion
+            for field, field_type in known_fields.items():
+                if field in metadata:
+                    value = metadata[field]
+                    if value is not None:
+                        if field_type == bool:
+                            metadata_to_set[field] = bool(value)
+                        elif field_type == float:
+                            try:
+                                metadata_to_set[field] = float(value)
+                            except (ValueError, TypeError):
+                                metadata_to_set[field] = 0.0
+                        else:
+                            metadata_to_set[field] = str(value)
+            
+            # Include all other metadata fields (dynamic fields from Qdrant)
+            excluded_fields = {
+                "asset_id",
+                "creator_id",
+                "creator_trust_score",
+                "creator_tenure_months",
+                "creator_verified",
+                "licensee_id",
+                "license_status",
+            }
+            
+            for field, value in metadata.items():
+                if field not in excluded_fields and field not in metadata_to_set and value is not None:
+                    # For unknown fields, preserve as-is (Neo4j handles type coercion)
+                    metadata_to_set[field] = value
+            
+            # Build dynamic SET clause
+            set_clauses = [f"a.{key} = ${key}" for key in metadata_to_set.keys()]
+            set_clause_str = ", ".join(set_clauses) if set_clauses else "a.asset_id = a.asset_id"  # no-op if empty
+            
+            query = f"""
+                MERGE (a:Asset {{asset_id: $asset_id}})
+                SET {set_clause_str}
+            """
+            
+            session.run(query, asset_id=asset_id, **metadata_to_set)
 
             creator_id = metadata.get("creator_id")
             if creator_id:
@@ -155,7 +199,7 @@ class GraphDBService:
                     )
 
     def fetch_asset_neighborhood(self, asset_id: str, limit_assets: int = 64) -> dict[str, Any]:
-        with self.driver.session(database=self.database) as session:
+        with self._open_session() as session:
             records = session.run(
                 """
                 MATCH (q:Asset {asset_id: $asset_id})
@@ -200,7 +244,7 @@ class GraphDBService:
         }
 
     def fetch_asset_relationship_graph(self, asset_id: str, limit_assets: int = 24) -> dict[str, Any]:
-        with self.driver.session(database=self.database) as session:
+        with self._open_session() as session:
             records = session.run(
                 """
                 MATCH (q:Asset {asset_id: $asset_id})
@@ -224,22 +268,7 @@ class GraphDBService:
                          rel_weight: coalesce(r3.weight, 1.0)
                      }) AS licensee_links
                 RETURN q.asset_id AS query_asset_id,
-                       q {
-                           .asset_id,
-                           .modality,
-                           .source,
-                           .filename,
-                           .title,
-                           .user_id,
-                           .authorization_status,
-                           .decision_label,
-                           .decision_confidence,
-                           .is_flagged,
-                           .source_tier,
-                           .license_file_name,
-                           .license_content_type,
-                           .uploaded_at
-                       } AS query_asset,
+                       q AS query_asset_node,
                        asset_links,
                        creator_links,
                        licensee_links
@@ -252,7 +281,7 @@ class GraphDBService:
         if row is None:
             return {"query_asset_id": asset_id, "nodes": [], "edges": []}
 
-        query_asset = dict(row["query_asset"] or {})
+        query_asset = dict(row["query_asset_node"]) if row["query_asset_node"] else {}
         query_asset_id = str(query_asset.get("asset_id") or asset_id)
 
         nodes: list[dict[str, Any]] = [

@@ -61,6 +61,7 @@ class RegistryManager:
             self._ensure_collection(self.video_collection_name, self.video_dim)
             self._ensure_collection(self.audio_collection_name, self.audio_dim)
             self._ensure_semantic_collection()
+            self._ensure_payload_indexes()
 
     def _ensure_collection(self, collection_name: str, vector_size: int) -> None:
         if self.qdrant is None:
@@ -86,6 +87,93 @@ class RegistryManager:
 
     def _ensure_semantic_collection(self) -> None:
         self._ensure_collection(self.semantic_collection_name, self.semantic_dim)
+
+    def _ensure_payload_indexes(self) -> None:
+        if self.qdrant is None:
+            return
+
+        index_specs = {
+            self.image_collection_name: ["user_id"],
+            self.video_collection_name: ["user_id"],
+            self.audio_collection_name: ["user_id"],
+            self.semantic_collection_name: ["user_id", "modality"],
+        }
+
+        for collection_name, fields in index_specs.items():
+            for field_name in fields:
+                try:
+                    self.qdrant.create_payload_index(
+                        collection_name=collection_name,
+                        field_name=field_name,
+                        field_schema=qmodels.PayloadSchemaType.KEYWORD,
+                        wait=True,
+                    )
+                except Exception:
+                    # Safe to ignore when index already exists or server version
+                    # applies indexes lazily; querying remains functional.
+                    pass
+
+    def _ensure_filter_indexes_for_collection(self, collection_name: str) -> None:
+        if self.qdrant is None:
+            return
+
+        fields = ["user_id"]
+        if collection_name == self.semantic_collection_name:
+            fields.append("modality")
+
+        for field_name in fields:
+            try:
+                self.qdrant.create_payload_index(
+                    collection_name=collection_name,
+                    field_name=field_name,
+                    field_schema=qmodels.PayloadSchemaType.KEYWORD,
+                    wait=True,
+                )
+            except Exception:
+                pass
+
+    @staticmethod
+    def _is_missing_filter_index_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return (
+            "index required but not found" in message
+            and ("user_id" in message or "modality" in message)
+        )
+
+    def _query_points_with_retry(
+        self,
+        *,
+        collection_name: str,
+        query: list[float],
+        limit: int,
+        query_filter: qmodels.Filter | None,
+    ) -> list[Any]:
+        if self.qdrant is None:
+            raise RuntimeError("Qdrant client is not initialized")
+
+        try:
+            response = self.qdrant.query_points(
+                collection_name=collection_name,
+                query=query,
+                limit=limit,
+                query_filter=query_filter,
+                with_payload=True,
+                with_vectors=False,
+            )
+            return response.points
+        except Exception as exc:
+            if query_filter is None or not self._is_missing_filter_index_error(exc):
+                raise
+            self._ensure_filter_indexes_for_collection(collection_name)
+            response = self.qdrant.query_points(
+                collection_name=collection_name,
+                query=query,
+                limit=limit,
+                query_filter=query_filter,
+                with_payload=True,
+                with_vectors=False,
+            )
+            return response.points
 
     @staticmethod
     def _to_binary_row(hash_bytes: np.ndarray) -> np.ndarray:
@@ -257,16 +345,12 @@ class RegistryManager:
 
         with self._lock:
             query = self._binary_hash_to_vector(hash_bytes)
-
-            response = self.qdrant.query_points(
+            points = self._query_points_with_retry(
                 collection_name=self.image_collection_name,
                 query=query.tolist(),
                 limit=top_k,
                 query_filter=self._build_query_filter(owner_user_id=owner_user_id),
-                with_payload=True,
-                with_vectors=False,
             )
-            points = response.points
 
             results: list[MatchResult] = []
             for point in points:
@@ -295,16 +379,12 @@ class RegistryManager:
 
         with self._lock:
             query = self._binary_hash_to_vector(hash_bytes)
-
-            response = self.qdrant.query_points(
+            points = self._query_points_with_retry(
                 collection_name=self.video_collection_name,
                 query=query.tolist(),
                 limit=top_k,
                 query_filter=self._build_query_filter(owner_user_id=owner_user_id),
-                with_payload=True,
-                with_vectors=False,
             )
-            points = response.points
 
             results: list[MatchResult] = []
             for point in points:
@@ -334,16 +414,12 @@ class RegistryManager:
         with self._lock:
             query = np.asarray(embedding, dtype=np.float32).reshape(1, -1)
             query = self._normalize_rows(query)
-
-            response = self.qdrant.query_points(
+            points = self._query_points_with_retry(
                 collection_name=self.audio_collection_name,
                 query=query[0].tolist(),
                 limit=top_k,
                 query_filter=self._build_query_filter(owner_user_id=owner_user_id),
-                with_payload=True,
-                with_vectors=False,
             )
-            points = response.points
 
             results: list[MatchResult] = []
             for point in points:
@@ -381,24 +457,34 @@ class RegistryManager:
             )
 
             if hasattr(self.qdrant, "query_points"):
-                response = self.qdrant.query_points(
+                points = self._query_points_with_retry(
                     collection_name=self.semantic_collection_name,
                     query=query[0].tolist(),
                     limit=top_k,
                     query_filter=query_filter,
-                    with_payload=True,
-                    with_vectors=False,
                 )
-                points = response.points
             else:
-                points = self.qdrant.search(
-                    collection_name=self.semantic_collection_name,
-                    query_vector=query[0].tolist(),
-                    limit=top_k,
-                    query_filter=query_filter,
-                    with_payload=True,
-                    with_vectors=False,
-                )
+                try:
+                    points = self.qdrant.search(
+                        collection_name=self.semantic_collection_name,
+                        query_vector=query[0].tolist(),
+                        limit=top_k,
+                        query_filter=query_filter,
+                        with_payload=True,
+                        with_vectors=False,
+                    )
+                except Exception as exc:
+                    if query_filter is None or not self._is_missing_filter_index_error(exc):
+                        raise
+                    self._ensure_filter_indexes_for_collection(self.semantic_collection_name)
+                    points = self.qdrant.search(
+                        collection_name=self.semantic_collection_name,
+                        query_vector=query[0].tolist(),
+                        limit=top_k,
+                        query_filter=query_filter,
+                        with_payload=True,
+                        with_vectors=False,
+                    )
 
             results: list[MatchResult] = []
             for point in points:

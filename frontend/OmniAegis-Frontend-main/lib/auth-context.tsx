@@ -31,6 +31,7 @@ interface AuthSession {
 
 interface AuthContextType {
   user: User | null;
+  accessToken: string | null;
   loading: boolean;
   login: (email: string, password: string) => Promise<void>;
   signup: (name: string, email: string, password: string) => Promise<void>;
@@ -187,16 +188,19 @@ function getStoredSession(): AuthSession | null {
 
 export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [user, setUser] = useState<User | null>(null);
+  const [accessToken, setAccessToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   const persistSession = (session: AuthSession) => {
     setUser(session.user);
+    setAccessToken(session.accessToken);
     localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session.user));
     localStorage.setItem(SESSION_TOKEN_STORAGE_KEY, session.accessToken);
   };
 
   const clearSession = () => {
     setUser(null);
+    setAccessToken(null);
     localStorage.removeItem(SESSION_STORAGE_KEY);
     localStorage.removeItem(SESSION_TOKEN_STORAGE_KEY);
   };
@@ -241,6 +245,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         const stored = getStoredSession();
         if (stored?.accessToken.startsWith(DEMO_TOKEN_PREFIX)) {
           setUser(stored.user);
+          setAccessToken(stored.accessToken);
           setLoading(false);
           return;
         }
@@ -323,7 +328,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
 
   return (
     <AuthContext.Provider
-      value={{ user, loading, login, signup, loginWithGoogle, signupWithGoogle, logout, isAuthenticated: !!user }}
+      value={{ user, accessToken, loading, login, signup, loginWithGoogle, signupWithGoogle, logout, isAuthenticated: !!user }}
     >
       {children}
     </AuthContext.Provider>
