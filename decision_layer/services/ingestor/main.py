@@ -12,10 +12,22 @@ from redis.asyncio import Redis
 from redis.exceptions import ResponseError
 
 try:
+    from decision_layer.app.config import QdrantClientSingleton, load_qdrant_settings
+    from decision_layer.app.reasoning.graph_builder import GraphBuilder
+    from decision_layer.app.reasoning.reasoning_gate import DecisionLabel, ReasoningGate
+    from decision_layer.app.registry import RegistryManager
     from decision_layer.services.ml_engine import InferenceModelLoader
+    from decision_layer.services.graph_db import GraphDBService
+    from decision_layer.services.web_scraper.pipeline import WebCandidateDecision, WebCandidateProcessor
     from decision_layer.shared import close_db_clients, get_redis_client
 except ModuleNotFoundError:  # pragma: no cover
+    from app.config import QdrantClientSingleton, load_qdrant_settings
+    from app.reasoning.graph_builder import GraphBuilder
+    from app.reasoning.reasoning_gate import DecisionLabel, ReasoningGate
+    from app.registry import RegistryManager
     from services.ml_engine import InferenceModelLoader
+    from services.graph_db import GraphDBService
+    from services.web_scraper.pipeline import WebCandidateDecision, WebCandidateProcessor
     from shared import close_db_clients, get_redis_client
 
 
@@ -38,6 +50,31 @@ _INFERENCE_RUNTIME: _InferenceRuntime | None = None
 _INFERENCE_LOCK = asyncio.Lock()
 
 
+class _ProcessingRuntime:
+    def __init__(self) -> None:
+        settings = load_qdrant_settings()
+        qdrant_client = QdrantClientSingleton.get_client(settings)
+        self.registry = RegistryManager(audio_dim=96, semantic_dim=512, qdrant_client=qdrant_client)
+
+        try:
+            self.graph_db = GraphDBService.from_env()
+            self.graph_db.run_migrations()
+        except Exception:
+            self.graph_db = None
+
+        self.graph_builder = GraphBuilder(graph_db=self.graph_db)
+        self.reasoner = ReasoningGate(graph_builder=self.graph_builder)
+        self.web_processor = WebCandidateProcessor(
+            registry=self.registry,
+            graph_builder=self.graph_builder,
+            reasoner=self.reasoner,
+        )
+
+
+_PROCESSING_RUNTIME: _ProcessingRuntime | None = None
+_PROCESSING_LOCK = asyncio.Lock()
+
+
 async def _get_inference_runtime() -> _InferenceRuntime:
     global _INFERENCE_RUNTIME
 
@@ -48,6 +85,18 @@ async def _get_inference_runtime() -> _InferenceRuntime:
         if _INFERENCE_RUNTIME is None:
             _INFERENCE_RUNTIME = await asyncio.to_thread(_InferenceRuntime)
     return _INFERENCE_RUNTIME
+
+
+async def _get_processing_runtime() -> _ProcessingRuntime:
+    global _PROCESSING_RUNTIME
+
+    if _PROCESSING_RUNTIME is not None:
+        return _PROCESSING_RUNTIME
+
+    async with _PROCESSING_LOCK:
+        if _PROCESSING_RUNTIME is None:
+            _PROCESSING_RUNTIME = await asyncio.to_thread(_ProcessingRuntime)
+    return _PROCESSING_RUNTIME
 
 
 def _inference_sync(asset_id: str, metadata: dict[str, Any]) -> dict[str, Any]:
@@ -71,13 +120,84 @@ def _inference_sync(asset_id: str, metadata: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _extract_web_candidate(metadata: dict[str, Any]) -> dict[str, Any] | None:
+    if metadata.get("modality") != "web" and metadata.get("content_type") not in {"text/html", "text/plain"}:
+        return None
+
+    raw_candidate = metadata.get("metadata")
+    if isinstance(raw_candidate, str):
+        try:
+            candidate = json.loads(raw_candidate)
+            if isinstance(candidate, dict):
+                return candidate
+        except json.JSONDecodeError:
+            pass
+    elif isinstance(raw_candidate, dict):
+        return raw_candidate
+
+    if any(key in metadata for key in ("text", "excerpt", "title", "canonical_url", "url", "source_url")):
+        return dict(metadata)
+
+    return None
+
+
+async def _process_web_candidate_async(asset_id: str, metadata: dict[str, Any]) -> dict[str, Any]:
+    runtime = await _get_processing_runtime()
+    candidate = _extract_web_candidate(metadata)
+    if candidate is None:
+        raise ValueError("metadata does not describe a web candidate")
+
+    result: WebCandidateDecision = await asyncio.to_thread(runtime.web_processor.process_candidate, candidate)
+
+    if result.decision == "hitl":
+        redis_client = await get_redis_client()
+        priority = float(min(max(result.confidence, 0.0), 1.0))
+        hitl_payload = {
+            "asset_id": result.asset_id,
+            "metadata": result.query_metadata,
+            "inference": {
+                "decision": result.decision,
+                "confidence": result.confidence,
+                "reasoning": result.reasoning,
+                "infringement_probability": result.infringement_probability,
+            },
+            "queued_at": datetime.now(UTC).isoformat(),
+        }
+        await redis_client.zadd(HITL_QUEUE_KEY, {json.dumps(hitl_payload): priority})
+
+    logger.info(
+        "Processed web candidate asset_id=%s decision=%s confidence=%.4f",
+        result.asset_id,
+        result.decision,
+        result.confidence,
+    )
+
+    return {
+        "asset_id": result.asset_id,
+        "decision": result.decision,
+        "confidence": result.confidence,
+        "infringement_probability": result.infringement_probability,
+        "reasoning": result.reasoning,
+        "query_metadata": result.query_metadata,
+        "matches": result.semantic_matches,
+    }
+
+
 async def run_ml_inference_async(asset_id: str, metadata: dict[str, Any]) -> dict[str, Any]:
     await _get_inference_runtime()
     return await asyncio.to_thread(_inference_sync, asset_id, metadata)
 
 
-async def process_asset_async(asset_id: str, metadata: dict[str, Any]) -> None:
-    """Placeholder asset processing hook for downstream ingestion logic."""
+async def process_asset_async(asset_id: str, metadata: dict[str, Any]) -> dict[str, Any]:
+    """Process ingested assets, including web candidates, through matching and authorization."""
+
+    web_candidate = _extract_web_candidate(metadata)
+    if web_candidate is not None:
+        try:
+            return await _process_web_candidate_async(asset_id=asset_id, metadata=metadata)
+        except Exception as exc:
+            logger.warning("Web candidate processing fallback engaged for asset_id=%s error=%s", asset_id, exc)
+
     inference = await run_ml_inference_async(asset_id=asset_id, metadata=metadata)
 
     if inference.get("decision") == "hitl":
@@ -92,6 +212,7 @@ async def process_asset_async(asset_id: str, metadata: dict[str, Any]) -> None:
         await redis_client.zadd(HITL_QUEUE_KEY, {json.dumps(hitl_payload): priority})
 
     logger.info("Processed asset_id=%s decision=%s", asset_id, inference.get("decision"))
+    return inference
 
 
 class RedisStreamIngestor:

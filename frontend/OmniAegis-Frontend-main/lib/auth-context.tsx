@@ -45,6 +45,33 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 const SESSION_STORAGE_KEY = 'sentinel-user';
 const SESSION_TOKEN_STORAGE_KEY = 'sentinel-access-token';
 const AUTH_API_BASE_URL = '/api/auth';
+const DEMO_TOKEN_PREFIX = 'demo-';
+
+const DEMO_USERS: Array<{
+  id: string;
+  email: string;
+  role: UserRole;
+  name: string;
+  aliases: string[];
+  passwords: string[];
+}> = [
+  {
+    id: 'demo-admin',
+    email: 'admin@sentinelai.com',
+    role: 'admin',
+    name: 'Admin User',
+    aliases: ['admin@sentinelai.com', 'admin'],
+    passwords: ['admin123', 'password'],
+  },
+  {
+    id: 'demo-reviewer',
+    email: 'reviewer@sentinelai.com',
+    role: 'reviewer',
+    name: 'Reviewer User',
+    aliases: ['reviewer@sentinelai.com', 'reviewer'],
+    passwords: ['reviewer123', 'password'],
+  },
+];
 
 function mapFirebaseAuthError(error: unknown): Error {
   if (!(error instanceof FirebaseError)) {
@@ -63,6 +90,12 @@ function mapFirebaseAuthError(error: unknown): Error {
 
   if (error.code === 'auth/popup-closed-by-user') {
     return new Error('Google sign-in popup was closed before completing authentication.');
+  }
+
+  if (error.code === 'auth/operation-not-allowed') {
+    return new Error(
+      'Email/Password sign-in is disabled in Firebase Authentication. Enable Email/Password provider in Firebase Console, or use demo credentials (admin/password) for local mode.',
+    );
   }
 
   return new Error(error.message || 'Authentication failed. Please try again.');
@@ -88,6 +121,68 @@ function parseAuthResponse(payload: any): AuthSession {
     },
     accessToken,
   };
+}
+
+function normalizeLoginIdentifier(identifier: string): string {
+  return identifier.trim().toLowerCase();
+}
+
+function buildDemoSession(identifier: string, password: string): AuthSession | null {
+  const normalizedIdentifier = normalizeLoginIdentifier(identifier);
+  const normalizedPassword = password.trim();
+
+  const match = DEMO_USERS.find(
+    (candidate) =>
+      candidate.aliases.includes(normalizedIdentifier) && candidate.passwords.includes(normalizedPassword),
+  );
+
+  if (!match) {
+    return null;
+  }
+
+  return {
+    user: {
+      id: match.id,
+      email: match.email,
+      role: match.role,
+      name: match.name,
+    },
+    accessToken: `${DEMO_TOKEN_PREFIX}${match.role}-token`,
+  };
+}
+
+function getStoredSession(): AuthSession | null {
+  try {
+    const rawUser = localStorage.getItem(SESSION_STORAGE_KEY);
+    const rawToken = localStorage.getItem(SESSION_TOKEN_STORAGE_KEY);
+    if (!rawUser || !rawToken) {
+      return null;
+    }
+
+    const parsedUser = JSON.parse(rawUser);
+    if (
+      !parsedUser ||
+      !parsedUser.id ||
+      !parsedUser.email ||
+      !parsedUser.role ||
+      !parsedUser.name ||
+      (parsedUser.role !== 'admin' && parsedUser.role !== 'reviewer')
+    ) {
+      return null;
+    }
+
+    return {
+      user: {
+        id: String(parsedUser.id),
+        email: String(parsedUser.email),
+        role: normalizeRole(parsedUser.role),
+        name: String(parsedUser.name),
+      },
+      accessToken: String(rawToken),
+    };
+  } catch {
+    return null;
+  }
 }
 
 export const AuthProvider = ({ children }: { children: ReactNode }) => {
@@ -143,6 +238,12 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   useEffect(() => {
     const unsubscribe = onIdTokenChanged(firebaseAuth, async (firebaseUser) => {
       if (!firebaseUser) {
+        const stored = getStoredSession();
+        if (stored?.accessToken.startsWith(DEMO_TOKEN_PREFIX)) {
+          setUser(stored.user);
+          setLoading(false);
+          return;
+        }
         clearSession();
         setLoading(false);
         return;
@@ -165,6 +266,12 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const login = async (email: string, password: string) => {
     setLoading(true);
     try {
+      const demoSession = buildDemoSession(email, password);
+      if (demoSession) {
+        persistSession(demoSession);
+        return;
+      }
+
       const credential = await signInWithEmailAndPassword(firebaseAuth, email, password);
       const session = await syncBackendSession(credential.user, 'password');
       persistSession(session);

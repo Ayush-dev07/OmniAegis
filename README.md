@@ -119,7 +119,7 @@ docker-compose up -d
 # - PostgreSQL: localhost:5432
 # - Redis: localhost:6379
 # - Neo4j: http://localhost:7474
-# - Qdrant: http://localhost:6333
+# - Qdrant: managed cloud instance configured by QDRANT_URL
 
 # View logs
 docker-compose logs -f
@@ -296,8 +296,8 @@ REDIS_URL=redis://...
 NEO4J_URI=neo4j://...
 
 # Vector DB
-QDRANT_MODE=local
-QDRANT_LOCAL_PATH=./.qdrant
+QDRANT_URL=https://YOUR-QDRANT-CLUSTER.cloud.qdrant.io:6333
+QDRANT_API_KEY=YOUR_QDRANT_API_KEY
 
 # Storage
 PINATA_API_KEY=...
