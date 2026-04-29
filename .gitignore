@@ -131,4 +131,4 @@ docker-compose.override.yml
 tmp/
 temp/
 .qdrant
-Md files
+Md files.env
