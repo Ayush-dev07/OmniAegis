@@ -5,16 +5,19 @@ import numpy as np
 
 
 class ImageFingerprinter:
-    """Fast perceptual hashing (pHash) for near-duplicate image detection.
+    """256‑bit perceptual hash (pHash) for near‑duplicate image detection.
 
-    - Output: 64-bit fingerprint packed in 8 bytes.
-    - Low-latency path: all operations are vectorized NumPy/OpenCV ops.
+    - Output: 256‑bit fingerprint packed in 32 bytes.
+    - Low‑latency: all operations are vectorized NumPy/OpenCV.
     """
 
-    def __init__(self, hash_size: int = 8, highfreq_factor: int = 4) -> None:
+    def __init__(self, hash_size: int = 16, highfreq_factor: int = 4) -> None:
+        if hash_size % 8 != 0:
+            raise ValueError("hash_size must be a multiple of 8")
         self.hash_size = hash_size
         self.highfreq_factor = highfreq_factor
         self.target_size = self.hash_size * self.highfreq_factor
+        self._bits = self.hash_size * self.hash_size  # 256 for default
 
     def fingerprint_from_bytes(self, content: bytes) -> dict:
         arr = np.frombuffer(content, dtype=np.uint8)
@@ -39,7 +42,6 @@ class ImageFingerprinter:
         dct = cv2.dct(np.float32(resized))
         low_freq = dct[: self.hash_size, : self.hash_size]
 
-        # Robust median thresholding avoids bright/dark bias.
         median = np.median(low_freq)
         bits = (low_freq > median).astype(np.uint8).reshape(-1)
 
@@ -48,5 +50,38 @@ class ImageFingerprinter:
             "hash_hex": packed.tobytes().hex(),
             "hash_bits": "".join(bits.astype(str)),
             "hash_bytes": packed,
-            "hash_size_bits": 64,
+            "hash_size_bits": self._bits,
         }
+
+    def to_vector(self, fingerprint: dict) -> np.ndarray:
+        """Convert fingerprint to a float32 vector (0/1) for Milvus."""
+        bits = np.frombuffer(fingerprint["hash_bytes"], dtype=np.uint8)
+        return np.unpackbits(bits).astype(np.float32)
+    
+#(Instant test)
+
+if __name__ == "__main__":
+    # 1. Initialize the fingerprinter
+    fingerprinter = ImageFingerprinter()
+
+    # 2. Provide the path to an image file
+    image_path = "fingerprints/pud.jpg"  # Replace with your actual image filename
+
+    try:
+        # 3. Read the file as bytes
+        with open(image_path, "rb") as f:
+            image_bytes = f.read()
+
+        # 4. Generate the fingerprint
+        result = fingerprinter.fingerprint_from_bytes(image_bytes)
+
+        # 5. Print the output
+        print(f"Fingerprint for {image_path}:")
+        print(f"Hex Hash:  {result['hash_hex']}")
+        print(f"Bits:      {result['hash_bits']}")
+        print(f"Byte Size: {len(result['hash_bytes'])} bytes")
+
+    except FileNotFoundError:
+        print(f"Error: The file '{image_path}' was not found.")
+    except Exception as e:
+        print(f"An error occurred: {e}")
